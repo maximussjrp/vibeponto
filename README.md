@@ -1,0 +1,253 @@
+# VibePonto - Sistema de Ponto Eletrônico
+
+Sistema completo de ponto eletrônico com benefícios flexíveis, desenvolvido com conformidade à Portaria 671/MTE e LGPD.
+
+## 🚀 Funcionalidades
+
+### Ponto Eletrônico
+- ✅ Marcação com reconhecimento facial
+- ✅ Marcação por QR Code
+- ✅ Geolocalização com geofencing
+- ✅ Modo offline com sincronização
+- ✅ Multi-dispositivo com vinculação
+
+### AuditorIA (IA de Auditoria)
+- ✅ Detecção de fraudes em tempo real
+- ✅ Análise de liveness (anti-spoofing)
+- ✅ Verificação de localização
+- ✅ Detecção de anomalias de horário
+- ✅ Workflow de revisão manual
+
+### Documentos
+- ✅ Upload e gestão de documentos
+- ✅ Assinatura eletrônica (e-Sign)
+- ✅ Preparado para ICP-Brasil
+- ✅ Gestão de holerites e contratos
+
+### Benefícios Flexíveis
+- ✅ Carteiras VA/VR/VT/Flex
+- ✅ Cartões virtuais e físicos
+- ✅ Recargas individuais e em lote
+- ✅ Histórico de transações
+- ✅ Políticas configuráveis
+
+### Compliance
+- ✅ Portaria 671/MTE
+- ✅ Exportação AEJ
+- ✅ LGPD compliant
+- ✅ Multi-tenant isolado
+
+## 🏗️ Arquitetura
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Mobile    │     │     Web     │     │   Relógio   │
+│  (Flutter)  │────▶│   (React)   │────▶│   (REP-P)   │
+└─────────────┘     └─────────────┘     └─────────────┘
+       │                   │                   │
+       └───────────────────┼───────────────────┘
+                           ▼
+                 ┌─────────────────┐
+                 │   API Gateway   │
+                 │   (FastAPI)     │
+                 └────────┬────────┘
+                          │
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+┌───────────────┐ ┌───────────────┐ ┌───────────────┐
+│   PostgreSQL  │ │     Redis     │ │    MinIO      │
+│  + PostGIS    │ │   (Cache)     │ │  (Storage)    │
+│  + Timescale  │ │               │ │               │
+└───────────────┘ └───────────────┘ └───────────────┘
+```
+
+## 📋 Pré-requisitos
+
+- Docker e Docker Compose
+- Python 3.11+
+- Node.js 18+ (para frontend)
+
+## 🛠️ Instalação
+
+### 1. Clonar e configurar
+
+```bash
+# Clonar repositório
+git clone https://github.com/sua-org/vibeponto.git
+cd vibeponto
+
+# Copiar arquivo de ambiente
+cp .env.example .env
+```
+
+### 2. Subir infraestrutura
+
+```bash
+# Subir todos os serviços
+docker-compose up -d
+
+# Verificar status
+docker-compose ps
+```
+
+### 3. Acessar serviços
+
+| Serviço | URL | Credenciais |
+|---------|-----|-------------|
+| API Docs | http://localhost:8000/docs | - |
+| MinIO Console | http://localhost:9001 | minioadmin / minioadmin123 |
+| RabbitMQ | http://localhost:15672 | vibeponto / rabbitmq_dev_123 |
+
+### 4. Popular banco de dados
+
+```bash
+# Rodar migrations
+docker-compose exec api alembic upgrade head
+
+# Rodar seed
+docker-compose exec api python -m scripts.seed
+```
+
+## 🔐 Credenciais de Desenvolvimento
+
+Após rodar o seed:
+
+| Perfil | Email | Senha |
+|--------|-------|-------|
+| Admin | admin@vibecoding.com.br | Admin@123 |
+| Gestor | joao@vibecoding.com.br | Gestor@123 |
+| Colaborador | maria@vibecoding.com.br | Colab@123 |
+
+## 📁 Estrutura do Projeto
+
+```
+vibeponto/
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── routes/          # Rotas da API
+│   │   │   └── deps.py          # Dependências (auth, etc)
+│   │   ├── core/
+│   │   │   ├── config.py        # Configurações
+│   │   │   ├── database.py      # Conexão DB
+│   │   │   └── security.py      # JWT, senhas
+│   │   ├── models/
+│   │   │   └── models.py        # Modelos SQLAlchemy
+│   │   ├── schemas/             # Schemas Pydantic
+│   │   ├── services/
+│   │   │   ├── auditoria.py     # AuditorIA
+│   │   │   └── storage.py       # MinIO
+│   │   ├── tasks/               # Celery tasks
+│   │   ├── main.py              # App FastAPI
+│   │   └── worker.py            # Celery worker
+│   ├── Dockerfile
+│   └── pyproject.toml
+├── scripts/
+│   ├── init-db.sql              # Init PostgreSQL
+│   └── seed.py                  # Dados de dev
+├── docker-compose.yml
+└── README.md
+```
+
+## 🔧 Desenvolvimento
+
+### Rodar localmente (sem Docker)
+
+```bash
+# Criar ambiente virtual
+cd backend
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+source .venv/bin/activate  # Linux/Mac
+
+# Instalar dependências
+pip install -e .
+
+# Rodar API
+uvicorn app.main:app --reload
+
+# Rodar Celery worker (outro terminal)
+celery -A app.worker worker --loglevel=info
+```
+
+### Testes
+
+```bash
+# Rodar testes
+pytest
+
+# Com cobertura
+pytest --cov=app --cov-report=html
+```
+
+### Linting
+
+```bash
+# Ruff (linter + formatter)
+ruff check .
+ruff format .
+```
+
+## 📡 API
+
+### Autenticação
+
+Todas as rotas (exceto login) requerem token JWT:
+
+```bash
+# Login
+curl -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@vibecoding.com.br", "password": "Admin@123"}'
+
+# Usar token
+curl http://localhost:8000/api/v1/usuarios/me \
+  -H "Authorization: Bearer <token>"
+```
+
+### Principais endpoints
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| POST | /api/v1/auth/login | Login |
+| GET | /api/v1/usuarios/me | Perfil atual |
+| POST | /api/v1/ponto | Registrar marcação |
+| GET | /api/v1/espelho/{mes}/{ano} | Espelho de ponto |
+| GET | /api/v1/beneficios/carteiras | Listar carteiras |
+
+Documentação completa: http://localhost:8000/docs
+
+## 🔒 Segurança
+
+- JWT com refresh tokens
+- Senhas com bcrypt
+- MFA com TOTP
+- Rate limiting
+- Audit log completo
+- Isolamento multi-tenant
+
+## 📜 Conformidade
+
+### Portaria 671/MTE
+- Registro eletrônico de ponto (REP)
+- Arquivo de Espelho de Ponto (AEJ)
+- Comprovante de marcação
+- Assinatura digital
+
+### LGPD
+- Consentimento explícito
+- Direito ao esquecimento
+- Portabilidade de dados
+- Retenção configurável (5 anos padrão)
+
+## 🤝 Contribuindo
+
+1. Fork o projeto
+2. Crie sua branch (`git checkout -b feature/nova-feature`)
+3. Commit suas mudanças (`git commit -m 'Add nova feature'`)
+4. Push para a branch (`git push origin feature/nova-feature`)
+5. Abra um Pull Request
+
+## 📄 Licença
+
+Proprietário - Vibe Coding © 2025
