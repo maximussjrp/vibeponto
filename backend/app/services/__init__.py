@@ -4,7 +4,7 @@ from app.services.auditoria import AuditorIAService, processar_auditoria_backgro
 from app.services.geo import GeoService, geo_service, GeoPoint, GeoValidationResult
 from app.services.lgpd import LGPDService, lgpd_service
 from app.services.pdf import PDFService, pdf_service
-from app.services.storage import StorageService, get_storage_service, storage_service
+from app.services.storage import StorageService, get_storage_service
 from app.services.facial_recognition import (
     facial_service,
     get_facial_service,
@@ -26,7 +26,6 @@ __all__ = [
     "pdf_service",
     "StorageService",
     "get_storage_service",
-    "storage_service",
     "facial_service",
     "get_facial_service",
     "FaceDetectionResult",

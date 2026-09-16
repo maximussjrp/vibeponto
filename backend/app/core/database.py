@@ -46,4 +46,8 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def init_db() -> None:
     """Inicializa o banco de dados (cria tabelas)."""
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        if settings.environment == "development":
+            await conn.run_sync(Base.metadata.create_all)
+        else:
+            from sqlalchemy import text
+            await conn.execute(text("SELECT 1"))

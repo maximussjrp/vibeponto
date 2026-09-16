@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import UUID, uuid4
 
 import bcrypt
 from jose import JWTError, jwt
@@ -37,7 +38,7 @@ def create_access_token(
     expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
     )
-    to_encode.update({"exp": expire, "type": "access"})
+    to_encode.update({"exp": expire, "type": "access", "jti": str(uuid4())})
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.jwt_algorithm)
 
 
@@ -45,16 +46,20 @@ def create_refresh_token(data: dict[str, Any]) -> str:
     """Cria JWT refresh token."""
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    to_encode.update({"exp": expire, "type": "refresh", "jti": str(uuid4())})
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.jwt_algorithm)
 
 
 def decode_token(token: str) -> dict[str, Any] | None:
     """Decodifica e valida JWT."""
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm],
+                             options={"require_exp": True, "require_sub": True})
+        UUID(payload["sub"])
+        if payload.get("type") not in ("access", "refresh"):
+            return None
         return payload
-    except JWTError:
+    except (JWTError, ValueError, TypeError, KeyError, AttributeError):
         return None
 
 

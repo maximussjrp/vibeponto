@@ -66,7 +66,7 @@ class DocumentoRead(DocumentoBase, TimestampSchema):
     requer_assinatura: bool
     assinatura_status: AssinaturaStatus
     
-    metadata: Optional[dict] = None
+    metadata: Optional[dict] = Field(default=None, validation_alias="extra_data")
 
 
 class DocumentoWithAssinaturas(DocumentoRead):

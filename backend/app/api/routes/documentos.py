@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -71,7 +71,7 @@ async def listar_documentos(
     )
     
     # Filtro por permissão
-    if current_user.papel == UserRole.COLABORADOR:
+    if not current_user.has_role(UserRole.ADMIN_DP, UserRole.GESTOR):
         query = query.where(Documento.usuario_id == current_user.id)
         count_query = count_query.where(Documento.usuario_id == current_user.id)
     
@@ -158,7 +158,7 @@ async def criar_documento(
         arquivo_hash=upload_result["hash"],
         arquivo_mime=upload.arquivo_mime,
         requer_assinatura=data.requer_assinatura,
-        metadata=data.metadata,
+        extra_data=data.metadata,
     )
     
     db.add(documento)
@@ -194,7 +194,7 @@ async def get_documento(
         )
     
     # Verificar permissão
-    if current_user.papel == UserRole.COLABORADOR and documento.usuario_id != current_user.id:
+    if not current_user.is_gestor() and documento.usuario_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acesso negado",
@@ -230,7 +230,7 @@ async def download_documento(
         )
     
     # Verificar permissão
-    if current_user.papel == UserRole.COLABORADOR and documento.usuario_id != current_user.id:
+    if not current_user.is_gestor() and documento.usuario_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acesso negado",
@@ -263,11 +263,12 @@ async def assinar_documento(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    http_request: Request,
 ):
     """Assinar documento."""
     
     result = await db.execute(
-        select(Documento).where(
+        select(Documento).with_for_update().where(
             Documento.id == documento_id,
             Documento.tenant_id == tenant.tenant_id,
         )
@@ -280,6 +281,12 @@ async def assinar_documento(
             detail="Documento não encontrado",
         )
     
+    # Even administrators cannot sign for a different recipient.
+    if documento.usuario_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Apenas o destinatário pode assinar")
+    if data.metodo != AssinaturaMetodo.ESIGN:
+        raise HTTPException(status_code=400, detail="Método de assinatura não implementado")
+
     # Verificar se requer assinatura
     if not documento.requer_assinatura:
         raise HTTPException(
@@ -312,8 +319,8 @@ async def assinar_documento(
         usuario_id=current_user.id,
         metodo=data.metodo,
         status=AssinaturaStatus.ASSINADO,
-        ip_address=data.ip_address,
-        user_agent=data.user_agent,
+        ip_address=http_request.client.host if http_request.client else None,
+        user_agent=http_request.headers.get("user-agent", "")[:500],
         geoloc=data.geoloc,
         documento_hash=documento.arquivo_hash,
         assinatura_data=assinatura_hash,
@@ -367,6 +374,8 @@ async def verificar_assinatura(
         select(Documento).where(Documento.id == documento_id)
     )
     documento = result.scalar_one()
+    if not current_user.is_gestor() and documento.usuario_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Acesso negado")
     
     result = await db.execute(
         select(Usuario).where(Usuario.id == assinatura.usuario_id)

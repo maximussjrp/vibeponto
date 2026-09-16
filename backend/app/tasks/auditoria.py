@@ -6,7 +6,7 @@ from uuid import UUID
 from celery import shared_task
 
 from app.core.database import async_session_maker
-from app.services.auditoria import auditoria_service
+from app.services.auditoria import AuditorIAService
 
 
 @shared_task(bind=True, max_retries=3)
@@ -27,11 +27,16 @@ def processar_auditoria_marcacao(self, marcacao_id: str, tenant_id: str):
 async def _processar_auditoria(marcacao_id: str, tenant_id: str):
     """Helper async para processar auditoria."""
     async with async_session_maker() as db:
-        await auditoria_service.processar_marcacao(
-            db=db,
-            marcacao_id=UUID(marcacao_id),
-            tenant_id=UUID(tenant_id),
-        )
+        from sqlalchemy import select
+        from app.models import MarcacaoPonto
+        result = await db.execute(select(MarcacaoPonto).where(
+            MarcacaoPonto.id == UUID(marcacao_id),
+            MarcacaoPonto.tenant_id == UUID(tenant_id),
+        ))
+        marcacao = result.scalar_one_or_none()
+        if marcacao is None:
+            return
+        await AuditorIAService(db).processar_marcacao(marcacao)
         await db.commit()
 
 
@@ -58,11 +63,7 @@ async def _processar_pendentes():
         
         for marcacao in marcacoes:
             try:
-                await auditoria_service.processar_marcacao(
-                    db=db,
-                    marcacao_id=marcacao.id,
-                    tenant_id=marcacao.tenant_id,
-                )
+                await AuditorIAService(db).processar_marcacao(marcacao)
             except Exception as e:
                 print(f"Erro ao processar marcação {marcacao.id}: {e}")
                 continue

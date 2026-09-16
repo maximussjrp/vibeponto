@@ -82,6 +82,7 @@ class RedisClient:
             tuple: (allowed, remaining, reset_time)
         """
         import time
+        from uuid import uuid4
         
         now = int(time.time())
         window_start = now - window_seconds
@@ -92,7 +93,7 @@ class RedisClient:
         # Remover entradas antigas
         pipeline.zremrangebyscore(redis_key, "-inf", window_start)
         # Adicionar requisição atual
-        pipeline.zadd(redis_key, {str(now): now})
+        pipeline.zadd(redis_key, {str(uuid4()): now})
         # Contar requisições na janela
         pipeline.zcard(redis_key)
         # Definir expiração
@@ -155,7 +156,7 @@ class RedisClient:
     
     async def get_password_reset_user(self, token: str) -> Optional[str]:
         """Obtém user_id pelo token de reset."""
-        return await self.client.get(f"password_reset:{token}")
+        return await self.client.getdel(f"password_reset:{token}")
     
     async def invalidate_password_reset_token(self, token: str) -> None:
         """Invalida token de reset."""

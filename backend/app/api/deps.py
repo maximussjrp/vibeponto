@@ -11,10 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import decode_token
+from app.core.sessions import validate_session, unauthorized
 from app.models import Usuario, UserRole, UserStatus
 
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 class CurrentUser:
@@ -52,23 +53,10 @@ async def get_current_user(
 ) -> CurrentUser:
     """Obtém o usuário atual a partir do token JWT."""
     
-    token = credentials.credentials
-    
-    try:
-        payload = decode_token(token)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido ou expirado",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido",
-        )
+    if credentials is None:
+        raise unauthorized()
+    payload = await validate_session(credentials.credentials, "access")
+    user_id = payload["sub"]
     
     # Buscar usuário
     result = await db.execute(

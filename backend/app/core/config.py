@@ -3,7 +3,9 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, PostgresDsn, RedisDsn
+import secrets
+
+from pydantic import AliasChoices, Field, PostgresDsn, RedisDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,19 +17,21 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
+        hide_input_in_errors=True,
     )
 
     # App
     app_name: str = "Vibe Ponto"
     app_version: str = "0.1.0"
     environment: Literal["development", "staging", "production"] = "development"
-    debug: bool = True
-    secret_key: str = Field(default="CHANGE_ME_IN_PRODUCTION_123456789")
+    debug: bool = False
+    secret_key: str = Field(default="", validation_alias=AliasChoices("SECRET_KEY", "JWT_SECRET_KEY"), repr=False)
     
     # API
     api_prefix: str = "/api/v1"
     allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
-    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173", "*"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     # Database
     database_url: PostgresDsn = Field(
@@ -38,6 +42,8 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: RedisDsn = Field(default="redis://localhost:6379/0")
+    celery_broker_url: str = "amqp://guest:guest@localhost:5672//"
+    celery_result_backend: str = ""
 
     # JWT
     jwt_algorithm: str = "HS256"
@@ -45,7 +51,7 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
 
     # Storage (MinIO/S3)
-    storage_endpoint: str = "localhost:9000"
+    storage_endpoint: str = "http://localhost:9000"
     storage_access_key: str = "minio"
     storage_secret_key: str = "minio123"
     storage_bucket: str = "vibe-ponto"
@@ -72,6 +78,22 @@ class Settings(BaseSettings):
     # LGPD
     data_retention_years: int = 5
     audit_log_retention_months: int = 36
+
+    @model_validator(mode="after")
+    def validate_security(self):
+        if self.environment != "development":
+            key = self.secret_key
+            if (len(key) < 32 or len(set(key)) < 12
+                    or any(word in key.lower() for word in ("change", "secret", "sua-chave", "example"))):
+                raise ValueError("Configure SECRET_KEY with a randomly generated secret of at least 32 characters")
+            if self.debug or "*" in self.cors_origins:
+                raise ValueError("Disable DEBUG and configure explicit CORS origins outside development")
+        elif not self.secret_key:
+            # Only for a single local process; configure a shared key for multiple workers.
+            self.secret_key = secrets.token_urlsafe(48)
+        if not self.celery_result_backend:
+            self.celery_result_backend = str(self.redis_url)
+        return self
 
 
 @lru_cache

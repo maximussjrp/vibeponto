@@ -18,6 +18,7 @@ class LoginRequest(BaseSchema):
     """Request de login."""
     
     email: EmailStr
+    tenant_id: Optional[UUID] = None
     password: str = Field(..., min_length=8)
     mfa_code: Optional[str] = Field(None, min_length=6, max_length=6)
     device_id: Optional[str] = None
@@ -28,7 +29,7 @@ class LoginResponse(BaseSchema):
     """Response de login."""
     
     access_token: str
-    refresh_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "Bearer"
     expires_in: int
     user: "UsuarioRead"
@@ -38,14 +39,14 @@ class LoginResponse(BaseSchema):
 class RefreshTokenRequest(BaseSchema):
     """Request de refresh token."""
     
-    refresh_token: str
+    refresh_token: Optional[str] = None
 
 
 class TokenResponse(BaseSchema):
     """Response de token."""
     
     access_token: str
-    refresh_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "Bearer"
     expires_in: int
 
@@ -69,6 +70,7 @@ class PasswordResetRequest(BaseSchema):
     """Request de reset de senha."""
     
     email: EmailStr
+    tenant_id: Optional[UUID] = None
 
 
 class PasswordResetConfirm(BaseSchema):

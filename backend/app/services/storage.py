@@ -211,4 +211,4 @@ def get_storage_service() -> StorageService:
 
 
 # Também exporta como variável direta para conveniência
-storage_service = get_storage_service()
+# Initialization is lazy: importing API/tasks must not contact object storage.

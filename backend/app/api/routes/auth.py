@@ -4,12 +4,17 @@ from datetime import datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, get_db
 from app.core.config import settings
+from app.core.sessions import (
+    COOKIE_NAME, check_cookie_origin, clear_refresh_cookie, cookie_mode, digest,
+    issue_tokens, set_refresh_cookie, unauthorized, validate_session,
+)
+from app.core.rate_limit import auth_rate_limit
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -39,7 +44,7 @@ from app.schemas import (
 )
 
 
-router = APIRouter(prefix="/auth", tags=["Autenticação"])
+router = APIRouter(prefix="/auth", tags=["Autenticação"], dependencies=[Depends(auth_rate_limit)])
 
 
 def generate_slug(nome: str) -> str:
@@ -85,7 +90,7 @@ async def register_tenant(
     existing_user = await db.execute(
         select(Usuario.id).where(Usuario.email == request.admin_email)
     )
-    if existing_user.scalar_one_or_none():
+    if existing_user.first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email já cadastrado no sistema",
@@ -193,6 +198,7 @@ async def login(
     request: LoginRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
     http_request: Request,
+    response: Response,
 ):
     """
     Autenticar usuário.
@@ -200,7 +206,11 @@ async def login(
     - Se MFA habilitado e código não fornecido, retorna requires_mfa=true
     - Se MFA habilitado e código fornecido, valida e retorna tokens
     """
-    # Buscar usuário por email usando query que retorna Row
+    web = cookie_mode(http_request)
+    if web:
+        check_cookie_origin(http_request)
+    response.headers["Cache-Control"] = "no-store"
+    # Email is unique per tenant. Never pick one of multiple matching accounts.
     result = await db.execute(
         select(
             Usuario.id,
@@ -220,9 +230,12 @@ async def login(
             Usuario.ultimo_login,
             Usuario.created_at,
             Usuario.updated_at,
-        ).where(Usuario.email == request.email)
+        ).where(Usuario.email == request.email,
+                *([Usuario.tenant_id == request.tenant_id] if request.tenant_id else []))
+        .limit(2)
     )
-    row = result.one_or_none()
+    rows = result.all()
+    row = rows[0] if len(rows) == 1 else None
     
     if not row:
         raise HTTPException(
@@ -297,15 +310,10 @@ async def login(
     
     # Gerar tokens
     papel_value = papel.value if hasattr(papel, 'value') else papel
-    access_token = create_access_token(
-        data={
-            "sub": str(user_id),
-            "tenant_id": str(tenant_id),
-            "papel": papel_value,
-        }
-    )
-    refresh_token_str = create_refresh_token(data={"sub": str(user_id)})
-    
+    access_token, refresh_token_str, expires = await issue_tokens(user_id, tenant_id, papel_value)
+    if web:
+        set_refresh_cookie(response, refresh_token_str, expires)
+
     # Atualizar último login
     await db.execute(
         update(Usuario)
@@ -335,7 +343,7 @@ async def login(
     
     return LoginResponse(
         access_token=access_token,
-        refresh_token=refresh_token_str,
+        refresh_token=None if web else refresh_token_str,
         expires_in=settings.access_token_expire_minutes * 60,
         user=user_data,
         requires_mfa=False,
@@ -344,79 +352,58 @@ async def login(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
-    request: RefreshTokenRequest,
+    http_request: Request,
+    response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: RefreshTokenRequest | None = None,
 ):
-    """Renovar access token usando refresh token."""
-    
-    try:
-        payload = decode_token(request.refresh_token)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token inválido ou expirado",
-        )
-    
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido",
-        )
-    
-    # Buscar usuário
-    result = await db.execute(
-        select(Usuario).where(Usuario.id == UUID(user_id))
-    )
+    web = cookie_mode(http_request)
+    if web:
+        check_cookie_origin(http_request)
+        token = http_request.cookies.get(COOKIE_NAME)
+    else:
+        token = request.refresh_token if request else None
+    if not token:
+        raise unauthorized()
+    payload = await validate_session(token, "refresh")
+    result = await db.execute(select(Usuario).where(Usuario.id == UUID(payload["sub"])))
     usuario = result.scalar_one_or_none()
-    
     if not usuario or usuario.status != UserStatus.ACTIVE:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Usuário não encontrado ou inativo",
-        )
-    
-    # Gerar novos tokens
-    # Tratar papel como string ou enum
-    papel_value = usuario.papel.value if hasattr(usuario.papel, 'value') else str(usuario.papel)
-    access_token = create_access_token(
-        data={
-            "sub": str(usuario.id),
-            "tenant_id": str(usuario.tenant_id),
-            "papel": papel_value,
-        }
-    )
-    new_refresh_token = create_refresh_token(data={"sub": str(usuario.id)})
-    
-    return TokenResponse(
-        access_token=access_token,
-        refresh_token=new_refresh_token,
-        expires_in=settings.access_token_expire_minutes * 60,
-    )
+        raise unauthorized()
+    payload["refresh_digest"] = digest(token)
+    papel = usuario.papel.value if hasattr(usuario.papel, "value") else usuario.papel
+    access, refresh, expires = await issue_tokens(usuario.id, usuario.tenant_id, papel, payload)
+    response.headers["Cache-Control"] = "no-store"
+    if web:
+        set_refresh_cookie(response, refresh, expires)
+    return TokenResponse(access_token=access, refresh_token=None if web else refresh,
+                         expires_in=settings.access_token_expire_minutes * 60)
 
 
 @router.post("/logout", response_model=SuccessResponse)
-async def logout(
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
-    http_request: Request,
-):
-    """
-    Logout do usuário.
-    
-    Adiciona token à blacklist no Redis.
-    """
+async def logout(http_request: Request, response: Response):
     from app.core.redis import get_redis
-    
-    # Extrair token do header
-    auth_header = http_request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header.split(" ")[1]
-        
-        # Adicionar à blacklist (expira junto com o token)
-        redis = await get_redis()
-        ttl = settings.access_token_expire_minutes * 60
-        await redis.blacklist_token(token, ttl)
-    
+    from redis.exceptions import RedisError
+
+    web = cookie_mode(http_request)
+    if web:
+        check_cookie_origin(http_request)
+    cookie = http_request.cookies.get(COOKIE_NAME) if web else None
+    bearer = http_request.headers.get("Authorization", "")
+    token = cookie or (bearer[7:] if bearer.lower().startswith("bearer ") else None)
+    if token:
+        try:
+            payload = await validate_session(token, "refresh" if cookie else "access")
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+        else:
+            try:
+                redis = await get_redis()
+                await redis.revoke_user_session(payload["sub"], payload["sid"])
+            except RedisError:
+                raise HTTPException(503, "Serviço de autenticação indisponível") from None
+    clear_refresh_cookie(response)
     return SuccessResponse(message="Logout realizado com sucesso")
 
 
@@ -455,6 +442,9 @@ async def change_password(
     )
     await db.commit()
     
+    from app.core.redis import get_redis
+    redis = await get_redis()
+    await redis.revoke_all_user_sessions(str(current_user.id))
     return SuccessResponse(message="Senha alterada com sucesso")
 
 
@@ -474,9 +464,12 @@ async def request_password_reset(
     
     # Buscar usuário
     result = await db.execute(
-        select(Usuario).where(Usuario.email == request.email)
+        select(Usuario).where(Usuario.email == request.email,
+                              *([Usuario.tenant_id == request.tenant_id] if request.tenant_id else []))
+        .limit(2)
     )
-    usuario = result.scalar_one_or_none()
+    users = result.scalars().all()
+    usuario = users[0] if len(users) == 1 else None
     
     # Sempre retorna sucesso para não expor se email existe
     if usuario:
@@ -552,15 +545,18 @@ async def setup_mfa(
     
     Retorna secret e QR code para configurar no app autenticador.
     """
+    result = await db.execute(select(Usuario).where(Usuario.id == current_user.id))
+    usuario = result.scalar_one_or_none()
+    if not usuario or usuario.mfa_enabled:
+        raise HTTPException(409, "Desative o MFA atual antes de configurar outro")
     # Gerar novo secret
     secret = generate_totp_secret()
     
     # Gerar URI para QR Code
-    qr_uri = get_totp_uri(secret, current_user.email, "VibePonto")
+    qr_uri = get_totp_uri(secret, current_user.email)
     
     # Gerar códigos de backup
-    import secrets
-    backup_codes = [secrets.token_hex(4).upper() for _ in range(10)]
+    backup_codes = []  # Recovery codes are not implemented; do not issue unusable codes.
     
     # Salvar secret (ainda não habilitado)
     await db.execute(
