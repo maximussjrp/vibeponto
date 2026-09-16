@@ -17,6 +17,7 @@ import { Loader2, Eye, EyeOff, Clock } from "lucide-react";
 const loginSchema = z.object({
   email: z.string().email("Email inválido"),
   password: z.string().min(6, "Senha deve ter pelo menos 6 caracteres"),
+  tenantId: z.string().uuid("Tenant invalido").or(z.literal("")).optional(),
   mfaCode: z.string().optional(),
 });
 
@@ -43,7 +44,7 @@ export default function LoginPage() {
     setIsLoading(true);
     
     try {
-      const result = await login(data.email, data.password, data.mfaCode);
+      const result = await login(data.email, data.password, data.mfaCode, data.tenantId || undefined);
       
       if (result.requiresMfa) {
         setRequiresMfa(true);
@@ -92,6 +93,21 @@ export default function LoginPage() {
                 />
                 {errors.email && (
                   <p className="text-sm text-destructive">{errors.email.message}</p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="tenantId">Tenant</Label>
+                <Input
+                  id="tenantId"
+                  type="text"
+                  placeholder="ID do tenant, se solicitado"
+                  autoComplete="organization"
+                  disabled={isLoading}
+                  {...register("tenantId")}
+                />
+                {errors.tenantId && (
+                  <p className="text-sm text-destructive">{errors.tenantId.message}</p>
                 )}
               </div>
 

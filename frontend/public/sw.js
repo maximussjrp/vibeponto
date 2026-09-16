@@ -1,458 +1,340 @@
-// VibePonto Service Worker v1.0.0
-const CACHE_NAME = 'vibeponto-v1';
-const OFFLINE_URL = '/offline';
-
-// Recursos para cache estático
-const STATIC_CACHE = [
-  '/',
-  '/offline',
-  '/manifest.json',
-  '/icons/icon-192x192.png',
-  '/icons/icon-512x512.png',
-];
-
-// Recursos de API para cache dinâmico
-const API_CACHE_NAME = 'vibeponto-api-v1';
-const SYNC_QUEUE_NAME = 'vibeponto-sync';
-
-// IndexedDB para sincronização offline
-const DB_NAME = 'vibeponto-offline';
-const DB_VERSION = 1;
+// VibePonto Service Worker
+const CACHE_NAME = "vibeponto-static-v2";
+const OFFLINE_URL = "/offline";
+const SYNC_QUEUE_NAME = "vibeponto-sync";
+const DB_NAME = "vibeponto-offline";
+const DB_VERSION = 2;
 const STORES = {
-  PENDING_SYNC: 'pending-sync',
-  CACHED_DATA: 'cached-data',
-  USER_DATA: 'user-data',
+  PENDING_SYNC: "pending-sync",
 };
 
-// Abrir IndexedDB
+const STATIC_CACHE = [
+  OFFLINE_URL,
+  "/manifest.json",
+  "/icons/icon-192x192.png",
+  "/icons/icon-512x512.png",
+];
+
 function openDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
-    
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
-      
-      // Store para operações pendentes de sincronização
-      if (!db.objectStoreNames.contains(STORES.PENDING_SYNC)) {
-        const syncStore = db.createObjectStore(STORES.PENDING_SYNC, { 
-          keyPath: 'id', 
-          autoIncrement: true 
-        });
-        syncStore.createIndex('timestamp', 'timestamp', { unique: false });
-        syncStore.createIndex('type', 'type', { unique: false });
+      for (const name of Array.from(db.objectStoreNames)) {
+        db.deleteObjectStore(name);
       }
-      
-      // Store para dados em cache
-      if (!db.objectStoreNames.contains(STORES.CACHED_DATA)) {
-        const cacheStore = db.createObjectStore(STORES.CACHED_DATA, { 
-          keyPath: 'url' 
-        });
-        cacheStore.createIndex('expiry', 'expiry', { unique: false });
-      }
-      
-      // Store para dados do usuário
-      if (!db.objectStoreNames.contains(STORES.USER_DATA)) {
-        db.createObjectStore(STORES.USER_DATA, { keyPath: 'key' });
-      }
+      const store = db.createObjectStore(STORES.PENDING_SYNC, {
+        keyPath: "id",
+        autoIncrement: true,
+      });
+      store.createIndex("timestamp", "timestamp", { unique: false });
+      store.createIndex("owner", "owner", { unique: false });
     };
   });
 }
 
-// Adicionar item à fila de sincronização
 async function addToSyncQueue(data) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORES.PENDING_SYNC, 'readwrite');
+    const tx = db.transaction(STORES.PENDING_SYNC, "readwrite");
     const store = tx.objectStore(STORES.PENDING_SYNC);
-    
-    const item = {
+    const request = store.add({
       ...data,
       timestamp: Date.now(),
       retries: 0,
-    };
-    
-    const request = store.add(item);
+    });
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
-// Obter itens pendentes de sincronização
-async function getPendingSyncItems() {
+async function getPendingSyncItems(owner) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORES.PENDING_SYNC, 'readonly');
+    const tx = db.transaction(STORES.PENDING_SYNC, "readonly");
     const store = tx.objectStore(STORES.PENDING_SYNC);
     const request = store.getAll();
-    
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const items = request.result || [];
+      resolve(owner ? items.filter((item) => item.owner === owner) : items);
+    };
     request.onerror = () => reject(request.error);
   });
 }
 
-// Remover item da fila de sincronização
 async function removeFromSyncQueue(id) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORES.PENDING_SYNC, 'readwrite');
+    const tx = db.transaction(STORES.PENDING_SYNC, "readwrite");
     const store = tx.objectStore(STORES.PENDING_SYNC);
     const request = store.delete(id);
-    
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
 }
 
-// Salvar dados em cache
-async function saveToCachedData(url, data, ttl = 3600000) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORES.CACHED_DATA, 'readwrite');
-    const store = tx.objectStore(STORES.CACHED_DATA);
-    
-    const item = {
-      url,
-      data,
-      expiry: Date.now() + ttl,
-      timestamp: Date.now(),
-    };
-    
-    const request = store.put(item);
+function deleteDatabase(name) {
+  return new Promise((resolve) => {
+    const request = indexedDB.deleteDatabase(name);
     request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+    request.onerror = () => resolve();
+    request.onblocked = () => resolve();
   });
 }
 
-// Obter dados do cache
-async function getFromCachedData(url) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORES.CACHED_DATA, 'readonly');
-    const store = tx.objectStore(STORES.CACHED_DATA);
-    const request = store.get(url);
-    
-    request.onsuccess = () => {
-      const result = request.result;
-      if (result && result.expiry > Date.now()) {
-        resolve(result.data);
-      } else {
-        resolve(null);
-      }
-    };
-    request.onerror = () => reject(request.error);
-  });
+function base64UrlDecode(value) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return atob(padded);
 }
 
-// Instalação do Service Worker
-self.addEventListener('install', (event) => {
-  console.log('[SW] Installing Service Worker...');
-  
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      console.log('[SW] Caching static assets');
-      return cache.addAll(STATIC_CACHE);
-    })
-  );
-  
+function tokenOwnerFromBearer(header) {
+  if (!header || !header.startsWith("Bearer ")) {
+    return null;
+  }
+
+  try {
+    const token = header.slice("Bearer ".length);
+    const [, payload] = token.split(".");
+    const claims = JSON.parse(base64UrlDecode(payload));
+    return claims.sub && claims.tenant_id ? `${claims.tenant_id}:${claims.sub}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function ownerFromAccessToken(token) {
+  return tokenOwnerFromBearer(token ? `Bearer ${token}` : null);
+}
+
+function isAllowedOfflinePonto(url, method) {
+  return method === "POST" && url.pathname === "/api/v1/ponto/registrar";
+}
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_CACHE)));
   self.skipWaiting();
 });
 
-// Ativação do Service Worker
-self.addEventListener('activate', (event) => {
-  console.log('[SW] Activating Service Worker...');
-  
+self.addEventListener("activate", (event) => {
   event.waitUntil(
     Promise.all([
-      // Limpar caches antigos
-      caches.keys().then((cacheNames) => {
-        return Promise.all(
-          cacheNames
-            .filter((name) => name !== CACHE_NAME && name !== API_CACHE_NAME)
-            .map((name) => caches.delete(name))
-        );
-      }),
-      // Assumir controle imediatamente
+      caches.keys().then((names) =>
+        Promise.all(names.filter((name) => name.startsWith("vibeponto") && name !== CACHE_NAME).map((name) => caches.delete(name)))
+      ),
       self.clients.claim(),
     ])
   );
 });
 
-// Interceptar requisições
-self.addEventListener('fetch', (event) => {
+self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
-  
-  // Ignorar requisições não-GET para cache (exceto ponto offline)
-  if (request.method !== 'GET') {
-    // Tratamento especial para registro de ponto offline
-    if (url.pathname.includes('/api/v1/ponto') && request.method === 'POST') {
-      event.respondWith(handleOfflinePonto(request));
-      return;
+
+  if (url.origin !== self.location.origin && !url.pathname.startsWith("/api/")) {
+    return;
+  }
+
+  if (request.method !== "GET") {
+    if (isAllowedOfflinePonto(url, request.method)) {
+      event.respondWith(handleOfflinePonto(request, url));
     }
     return;
   }
-  
-  // Estratégia para API
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(networkFirstWithCache(request));
+
+  if (url.pathname.startsWith("/api/")) {
+    event.respondWith(fetch(request));
     return;
   }
-  
-  // Estratégia para assets estáticos
+
   if (url.pathname.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot)$/)) {
     event.respondWith(cacheFirstWithNetwork(request));
     return;
   }
-  
-  // Estratégia para páginas HTML
-  event.respondWith(networkFirstWithOffline(request));
+
+  event.respondWith(networkOnlyWithOffline(request));
 });
 
-// Network first com fallback para cache
-async function networkFirstWithCache(request) {
-  try {
-    const response = await fetch(request);
-    
-    if (response.ok) {
-      const cache = await caches.open(API_CACHE_NAME);
-      cache.put(request, response.clone());
-      
-      // Também salvar no IndexedDB para acesso offline
-      const data = await response.clone().json();
-      await saveToCachedData(request.url, data);
-    }
-    
-    return response;
-  } catch (error) {
-    // Tentar cache
-    const cachedResponse = await caches.match(request);
-    if (cachedResponse) {
-      return cachedResponse;
-    }
-    
-    // Tentar IndexedDB
-    const cachedData = await getFromCachedData(request.url);
-    if (cachedData) {
-      return new Response(JSON.stringify(cachedData), {
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-    
-    throw error;
-  }
-}
-
-// Cache first com fallback para network
 async function cacheFirstWithNetwork(request) {
   const cachedResponse = await caches.match(request);
   if (cachedResponse) {
     return cachedResponse;
   }
-  
-  try {
-    const response = await fetch(request);
+
+  const response = await fetch(request);
+  if (response.ok) {
     const cache = await caches.open(CACHE_NAME);
-    cache.put(request, response.clone());
-    return response;
-  } catch (error) {
-    console.error('[SW] Failed to fetch asset:', error);
-    throw error;
+    await cache.put(request, response.clone());
   }
+  return response;
 }
 
-// Network first com página offline
-async function networkFirstWithOffline(request) {
+async function networkOnlyWithOffline(request) {
   try {
-    const response = await fetch(request);
-    
-    if (response.ok) {
-      const cache = await caches.open(CACHE_NAME);
-      cache.put(request, response.clone());
-    }
-    
-    return response;
-  } catch (error) {
-    const cachedResponse = await caches.match(request);
-    if (cachedResponse) {
-      return cachedResponse;
-    }
-    
-    // Retornar página offline
+    return await fetch(request);
+  } catch {
     return caches.match(OFFLINE_URL);
   }
 }
 
-// Tratamento especial para registro de ponto offline
-async function handleOfflinePonto(request) {
+async function handleOfflinePonto(request, url) {
   try {
-    // Tentar enviar normalmente
-    const response = await fetch(request.clone());
-    return response;
-  } catch (error) {
-    // Se offline, salvar na fila de sincronização
+    return await fetch(request.clone());
+  } catch {
+    const owner = tokenOwnerFromBearer(request.headers.get("Authorization"));
+    if (!owner) {
+      return new Response(JSON.stringify({ detail: "Sessao necessaria para registro offline." }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     const body = await request.json();
-    
     await addToSyncQueue({
-      type: 'PONTO',
+      type: "PONTO",
+      owner,
       url: request.url,
       method: request.method,
-      body: body,
-      headers: Object.fromEntries(request.headers.entries()),
+      body,
     });
-    
-    // Retornar resposta simulada
-    return new Response(JSON.stringify({
-      success: true,
-      offline: true,
-      message: 'Ponto registrado offline. Será sincronizado quando houver conexão.',
-      timestamp: new Date().toISOString(),
-    }), {
-      status: 202,
-      headers: { 'Content-Type': 'application/json' },
-    });
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        offline: true,
+        message: "Ponto registrado offline. Sera sincronizado quando a conexao voltar.",
+        timestamp: new Date().toISOString(),
+      }),
+      {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
   }
 }
 
-// Background Sync
-self.addEventListener('sync', (event) => {
-  console.log('[SW] Sync event:', event.tag);
-  
+self.addEventListener("sync", (event) => {
   if (event.tag === SYNC_QUEUE_NAME) {
-    event.waitUntil(syncPendingRequests());
+    event.waitUntil(syncPendingRequests({}));
   }
 });
 
-// Sincronizar requisições pendentes
-async function syncPendingRequests() {
-  const pendingItems = await getPendingSyncItems();
-  
-  console.log(`[SW] Syncing ${pendingItems.length} pending items...`);
-  
+async function syncPendingRequests({ accessToken } = {}) {
+  const owner = ownerFromAccessToken(accessToken);
+  if (!accessToken || !owner) {
+    return;
+  }
+
+  const pendingItems = await getPendingSyncItems(owner);
   for (const item of pendingItems) {
     try {
       const response = await fetch(item.url, {
         method: item.method,
-        headers: item.headers,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+          "X-Auth-Mode": "cookie",
+        },
         body: JSON.stringify(item.body),
       });
-      
+
       if (response.ok) {
         await removeFromSyncQueue(item.id);
-        console.log(`[SW] Synced item ${item.id}`);
-        
-        // Notificar o cliente
         const clients = await self.clients.matchAll();
         clients.forEach((client) => {
-          client.postMessage({
-            type: 'SYNC_SUCCESS',
-            item: item,
-          });
+          client.postMessage({ type: "SYNC_SUCCESS", item });
         });
-      } else if (response.status >= 400 && response.status < 500) {
-        // Erro do cliente, remover da fila
+      } else if (response.status !== 401 && response.status >= 400 && response.status < 500) {
         await removeFromSyncQueue(item.id);
-        console.error(`[SW] Client error for item ${item.id}, removing from queue`);
       }
-    } catch (error) {
-      console.error(`[SW] Failed to sync item ${item.id}:`, error);
-      // Manter na fila para tentar novamente
+    } catch {
+      // Mantem na fila para a proxima tentativa autenticada.
     }
   }
 }
 
-// Periodic Background Sync (se suportado)
-self.addEventListener('periodicsync', (event) => {
-  if (event.tag === 'sync-pending') {
-    event.waitUntil(syncPendingRequests());
+self.addEventListener("periodicsync", (event) => {
+  if (event.tag === "sync-pending") {
+    event.waitUntil(syncPendingRequests({}));
   }
 });
 
-// Push Notifications
-self.addEventListener('push', (event) => {
-  console.log('[SW] Push received:', event);
-  
-  let data = { title: 'VibePonto', body: 'Nova notificação' };
-  
+self.addEventListener("push", (event) => {
+  let data = { title: "VibePonto", body: "Nova notificacao" };
   if (event.data) {
     try {
       data = event.data.json();
-    } catch (e) {
+    } catch {
       data.body = event.data.text();
     }
   }
-  
+
   const options = {
     body: data.body,
-    icon: '/icons/icon-192x192.png',
-    badge: '/icons/badge-72x72.png',
+    icon: "/icons/icon-192x192.png",
+    badge: "/icons/badge-72x72.png",
     vibrate: [100, 50, 100],
     data: data.data || {},
     actions: data.actions || [],
-    tag: data.tag || 'vibeponto-notification',
+    tag: data.tag || "vibeponto-notification",
     renotify: true,
   };
-  
+
   event.waitUntil(self.registration.showNotification(data.title, options));
 });
 
-// Clique em notificação
-self.addEventListener('notificationclick', (event) => {
-  console.log('[SW] Notification clicked:', event);
-  
+self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  
-  const urlToOpen = event.notification.data?.url || '/dashboard';
-  
+  const urlToOpen = event.notification.data?.url || "/dashboard";
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      // Se já existe uma janela aberta, focar nela
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
-        if (client.url.includes(self.location.origin) && 'focus' in client) {
+        if (client.url.includes(self.location.origin) && "focus" in client) {
           client.navigate(urlToOpen);
           return client.focus();
         }
       }
-      // Caso contrário, abrir nova janela
       if (self.clients.openWindow) {
         return self.clients.openWindow(urlToOpen);
       }
+      return undefined;
     })
   );
 });
 
-// Mensagens do cliente
-self.addEventListener('message', (event) => {
-  console.log('[SW] Message received:', event.data);
-  
-  switch (event.data.type) {
-    case 'SKIP_WAITING':
+self.addEventListener("message", (event) => {
+  const data = event.data || {};
+
+  switch (data.type) {
+    case "SKIP_WAITING":
       self.skipWaiting();
       break;
-      
-    case 'GET_PENDING_COUNT':
-      getPendingSyncItems().then((items) => {
-        event.ports[0].postMessage({ count: items.length });
+
+    case "GET_PENDING_COUNT": {
+      const owner = ownerFromAccessToken(data.accessToken);
+      getPendingSyncItems(owner).then((items) => {
+        event.ports[0]?.postMessage({ count: items.length });
       });
       break;
-      
-    case 'FORCE_SYNC':
-      syncPendingRequests().then(() => {
-        event.ports[0].postMessage({ success: true });
+    }
+
+    case "FORCE_SYNC":
+      syncPendingRequests({ accessToken: data.accessToken }).then(() => {
+        event.ports[0]?.postMessage({ success: true });
       });
       break;
-      
-    case 'CLEAR_CACHE':
-      Promise.all([
-        caches.delete(CACHE_NAME),
-        caches.delete(API_CACHE_NAME),
-      ]).then(() => {
-        event.ports[0].postMessage({ success: true });
+
+    case "CLEAR_CACHE":
+      caches.delete(CACHE_NAME).then(() => {
+        event.ports[0]?.postMessage({ success: true });
+      });
+      break;
+
+    case "CLEAR_AUTH":
+      Promise.all([caches.delete(CACHE_NAME), deleteDatabase(DB_NAME)]).then(() => {
+        event.ports[0]?.postMessage({ success: true });
       });
       break;
   }
 });
-
-console.log('[SW] Service Worker loaded');

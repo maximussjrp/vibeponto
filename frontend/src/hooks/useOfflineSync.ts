@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
+import { useAuthStore } from '@/store/auth';
 
 interface PendingSyncItem {
   id: number;
@@ -25,6 +26,7 @@ interface OfflineSyncState {
 }
 
 export function useOfflineSync() {
+  const accessToken = useAuthStore((state) => state.accessToken);
   const [state, setState] = useState<OfflineSyncState>({
     isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
     isServiceWorkerReady: false,
@@ -133,7 +135,8 @@ export function useOfflineSync() {
 
   // Atualizar contagem de itens pendentes
   const updatePendingCount = useCallback(async () => {
-    if (!navigator.serviceWorker.controller) return;
+    const controller = navigator.serviceWorker.controller;
+    if (!controller) return;
 
     const messageChannel = new MessageChannel();
     
@@ -144,39 +147,33 @@ export function useOfflineSync() {
         resolve(count);
       };
 
-      navigator.serviceWorker.controller.postMessage(
-        { type: 'GET_PENDING_COUNT' },
+      controller.postMessage(
+        { type: 'GET_PENDING_COUNT', accessToken },
         [messageChannel.port2]
       );
     });
-  }, []);
+  }, [accessToken]);
 
   // Forçar sincronização
   const forceSync = useCallback(async () => {
-    if (!navigator.serviceWorker.controller) return;
+    const controller = navigator.serviceWorker.controller;
+    if (!controller) return;
 
     setState(prev => ({ ...prev, isSyncing: true }));
 
     try {
-      // Tentar Background Sync API primeiro
-      if ('sync' in window.ServiceWorkerRegistration.prototype) {
-        const registration = await navigator.serviceWorker.ready;
-        await registration.sync.register('vibeponto-sync');
-      } else {
-        // Fallback: enviar mensagem direta
-        const messageChannel = new MessageChannel();
-        
-        await new Promise<void>((resolve) => {
-          messageChannel.port1.onmessage = () => {
-            resolve();
-          };
+      const messageChannel = new MessageChannel();
 
-          navigator.serviceWorker.controller!.postMessage(
-            { type: 'FORCE_SYNC' },
-            [messageChannel.port2]
-          );
-        });
-      }
+      await new Promise<void>((resolve) => {
+        messageChannel.port1.onmessage = () => {
+          resolve();
+        };
+
+        controller.postMessage(
+          { type: 'FORCE_SYNC', accessToken },
+          [messageChannel.port2]
+        );
+      });
 
       setState(prev => ({ 
         ...prev, 
@@ -190,11 +187,12 @@ export function useOfflineSync() {
       console.error('Sync failed:', error);
       setState(prev => ({ ...prev, isSyncing: false }));
     }
-  }, [updatePendingCount]);
+  }, [accessToken, updatePendingCount]);
 
   // Limpar cache
   const clearCache = useCallback(async () => {
-    if (!navigator.serviceWorker.controller) return;
+    const controller = navigator.serviceWorker.controller;
+    if (!controller) return;
 
     const messageChannel = new MessageChannel();
     
@@ -204,7 +202,7 @@ export function useOfflineSync() {
         resolve();
       };
 
-      navigator.serviceWorker.controller.postMessage(
+      controller.postMessage(
         { type: 'CLEAR_CACHE' },
         [messageChannel.port2]
       );

@@ -6,7 +6,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import toast from "react-hot-toast";
 import { getErrorMessage } from "@/lib/api";
-import { useAuthStore } from "@/stores/auth-store";
+import { useAuthStore } from "@/store/auth";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,7 +46,7 @@ type SenhaForm = z.infer<typeof senhaSchema>;
 
 export default function PerfilPage() {
   const queryClient = useQueryClient();
-  const { user, setUser } = useAuthStore();
+  const { user, updateUser } = useAuthStore();
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -79,7 +79,7 @@ export default function PerfilPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["meu-perfil"] });
       if (user) {
-        setUser({ ...user, nome: data.nome, email: data.email });
+        updateUser({ nome: data.nome, email: data.email });
       }
       toast.success("Perfil atualizado com sucesso!");
     },
@@ -123,7 +123,7 @@ export default function PerfilPage() {
       });
       queryClient.invalidateQueries({ queryKey: ["meu-perfil"] });
       if (user) {
-        setUser({ ...user, foto_url: response.data.foto_url });
+        updateUser({ foto_url: response.data.foto_url });
       }
       toast.success("Foto atualizada!");
     } catch (error) {

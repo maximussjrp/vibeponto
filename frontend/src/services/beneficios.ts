@@ -24,9 +24,11 @@ export interface Beneficio {
   nome: string;
   tipo: TipoBeneficio;
   descricao?: string;
-  valor: number;
+  valor?: number;
+  valor_padrao?: number;
   valor_desconto?: number;
   percentual_empresa: number;
+  total_atribuicoes?: number;
   ativo: boolean;
   created_at: string;
   updated_at: string;
@@ -36,7 +38,8 @@ export interface BeneficioCreate {
   nome: string;
   tipo: TipoBeneficio;
   descricao?: string;
-  valor: number;
+  valor?: number;
+  valor_padrao?: number;
   valor_desconto?: number;
   percentual_empresa?: number;
 }
@@ -45,6 +48,7 @@ export interface BeneficioUpdate {
   nome?: string;
   descricao?: string;
   valor?: number;
+  valor_padrao?: number;
   valor_desconto?: number;
   percentual_empresa?: number;
   ativo?: boolean;
@@ -64,14 +68,20 @@ export interface BeneficioUsuario {
     id: string;
     nome: string;
     matricula: string;
+    foto_url?: string;
   };
 }
+
+export type Atribuicao = BeneficioUsuario & {
+  valor?: number;
+};
 
 export interface AtribuirBeneficioParams {
   beneficio_id: string;
   usuario_id: string;
-  data_inicio: string;
+  data_inicio?: string;
   data_fim?: string;
+  valor?: number;
   valor_personalizado?: number;
 }
 
@@ -90,6 +100,11 @@ export const beneficiosService = {
    */
   async list(params: ListBeneficiosParams = {}): Promise<PaginatedResponse<Beneficio>> {
     const { data } = await api.get("/beneficios", { params });
+    return data;
+  },
+
+  async listAtribuicoes(params: { page?: number; per_page?: number } = {}): Promise<PaginatedResponse<Atribuicao>> {
+    const { data } = await api.get("/beneficios/atribuicoes", { params });
     return data;
   },
 

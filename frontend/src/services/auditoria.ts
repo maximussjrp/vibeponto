@@ -22,6 +22,16 @@ export type SeveridadeAlerta = "baixa" | "media" | "alta" | "critica";
 
 export type StatusAlerta = "pendente" | "revisado" | "ignorado" | "resolvido";
 
+export type AlertaTipo =
+  | "fora_perimetro"
+  | "horario_invalido"
+  | "dispositivo_nao_autorizado"
+  | "multiplas_marcacoes"
+  | "localizacao_suspeita"
+  | "fraude_potencial";
+
+export type AlertaStatus = "novo" | "em_analise" | "resolvido" | "ignorado";
+
 export interface Auditoria {
   id: string;
   tenant_id: string;
@@ -49,6 +59,37 @@ export interface Auditoria {
     timestamp: string;
   };
 }
+
+export interface AlertaAuditoria extends Omit<Auditoria, "tipo" | "status" | "usuario"> {
+  tipo: AlertaTipo;
+  status: AlertaStatus;
+  data_hora: string;
+  usuario?: {
+    id: string;
+    nome: string;
+    matricula: string;
+    foto_url?: string;
+  };
+}
+
+export interface ListAlertasParams {
+  page?: number;
+  per_page?: number;
+  tipo?: AlertaTipo;
+  status?: AlertaStatus;
+  q?: string;
+}
+
+export interface AlertaStats {
+  novos: number;
+  em_analise: number;
+  resolvidos_mes: number;
+  total: number;
+}
+
+export type AlertasResponse = PaginatedResponse<AlertaAuditoria> & {
+  total_pages: number;
+};
 
 export interface AuditoriaRevisao {
   decisao: "ignorado" | "advertencia" | "corrigido" | "escalado";
@@ -87,6 +128,14 @@ export const auditoriaService = {
     return data;
   },
 
+  async listAlertas(params: ListAlertasParams = {}): Promise<AlertasResponse> {
+    const { data } = await api.get("/ponto/auditoria", { params });
+    return {
+      ...data,
+      total_pages: data.total_pages ?? data.pages ?? Math.ceil((data.total || 0) / (data.per_page || 1)),
+    };
+  },
+
   /**
    * Buscar alerta por ID
    */
@@ -101,6 +150,14 @@ export const auditoriaService = {
   async revisar(id: string, revisao: AuditoriaRevisao): Promise<Auditoria> {
     const { data } = await api.post(`/ponto/auditoria/${id}/revisar`, revisao);
     return data;
+  },
+
+  async resolverAlerta(id: string, observacao?: string): Promise<Auditoria> {
+    return this.revisar(id, { decisao: "corrigido", observacao });
+  },
+
+  async ignorarAlerta(id: string, observacao?: string): Promise<Auditoria> {
+    return this.revisar(id, { decisao: "ignorado", observacao });
   },
 
   /**
@@ -124,6 +181,11 @@ export const auditoriaService = {
     const { data } = await api.get("/ponto/auditoria/estatisticas", {
       params: { data_inicio: dataInicio, data_fim: dataFim },
     });
+    return data;
+  },
+
+  async getStats(): Promise<AlertaStats> {
+    const { data } = await api.get("/ponto/auditoria/estatisticas");
     return data;
   },
 

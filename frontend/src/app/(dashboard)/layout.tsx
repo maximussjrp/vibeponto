@@ -68,7 +68,7 @@ export default function DashboardLayout({
 }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { user, logout, isAuthenticated } = useAuthStore();
+  const { user, logout, isAuthenticated, initialized, loadUser } = useAuthStore();
   const { theme, setTheme } = useTheme();
   const { menuItems, homePage, canAccess } = usePermissions();
   
@@ -86,10 +86,14 @@ export default function DashboardLayout({
   }, [menuItems]);
   
   useEffect(() => {
-    if (!isAuthenticated) {
+    void loadUser();
+  }, [loadUser]);
+
+  useEffect(() => {
+    if (initialized && !isAuthenticated) {
       router.push("/login");
     }
-  }, [isAuthenticated, router]);
+  }, [initialized, isAuthenticated, router]);
   
   // Redireciona se o usuário não tem acesso à página atual
   useEffect(() => {
@@ -110,7 +114,7 @@ export default function DashboardLayout({
     router.push("/login");
   };
 
-  if (!isAuthenticated) {
+  if (!initialized || !isAuthenticated) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>

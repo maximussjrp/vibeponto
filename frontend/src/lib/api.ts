@@ -1,68 +1,98 @@
 /**
- * Cliente HTTP para comunicação com a API
+ * Cliente HTTP para comunicacao com a API.
  */
 
-import axios, { AxiosError, AxiosInstance } from "axios";
-import { useAuthStore } from "@/store/auth";
+import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from "axios";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
+type AuthHandlers = {
+  getAccessToken: () => string | null;
+  refreshAccessToken: () => Promise<string | null>;
+  clearAuth: () => void;
+};
+
+let authHandlers: AuthHandlers | null = null;
+
+export function setAuthHandlers(handlers: AuthHandlers) {
+  authHandlers = handlers;
+}
+
 export const api: AxiosInstance = axios.create({
   baseURL: API_URL,
+  withCredentials: true,
   headers: {
     "Content-Type": "application/json",
+    "X-Auth-Mode": "cookie",
   },
 });
 
-// Interceptor para adicionar token de autenticação
-api.interceptors.request.use((config) => {
-  const token = useAuthStore.getState().accessToken;
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+const refreshClient: AxiosInstance = axios.create({
+  baseURL: API_URL,
+  withCredentials: true,
+  headers: {
+    "Content-Type": "application/json",
+    "X-Auth-Mode": "cookie",
+  },
+});
+
+let refreshPromise: Promise<string | null> | null = null;
+
+export async function requestNewAccessToken(): Promise<string | null> {
+  if (!refreshPromise) {
+    refreshPromise = refreshClient
+      .post("/auth/refresh")
+      .then((response) => response.data?.access_token ?? null)
+      .finally(() => {
+        refreshPromise = null;
+      });
   }
+
+  return refreshPromise;
+}
+
+api.interceptors.request.use((config) => {
+  config.headers.set?.("X-Auth-Mode", "cookie");
+
+  const token = authHandlers?.getAccessToken();
+  if (token) {
+    config.headers.set?.("Authorization", `Bearer ${token}`);
+  }
+
   return config;
 });
 
-// Interceptor para tratar erros de autenticação
+function isRefreshRequest(config?: InternalAxiosRequestConfig) {
+  return Boolean(config?.url?.includes("/auth/refresh"));
+}
+
 api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
-    const originalRequest = error.config;
-    
-    // Se 401 e não é refresh, tentar renovar token
+    const originalRequest = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined;
+
     if (
       error.response?.status === 401 &&
       originalRequest &&
-      !originalRequest.url?.includes("/auth/refresh")
+      !originalRequest._retry &&
+      !isRefreshRequest(originalRequest) &&
+      authHandlers
     ) {
-      const refreshToken = useAuthStore.getState().refreshToken;
-      
-      if (refreshToken) {
-        try {
-          const { data } = await api.post("/auth/refresh", {
-            refresh_token: refreshToken,
-          });
-          
-          useAuthStore.getState().setTokens(data.access_token, data.refresh_token);
-          
-          // Retry da requisição original
-          if (originalRequest.headers) {
-            originalRequest.headers.Authorization = `Bearer ${data.access_token}`;
-          }
-          return api(originalRequest);
-        } catch {
-          // Refresh falhou, fazer logout
-          useAuthStore.getState().logout();
-          window.location.href = "/login";
-        }
+      originalRequest._retry = true;
+
+      const accessToken = await authHandlers.refreshAccessToken();
+      if (accessToken) {
+        originalRequest.headers.set?.("Authorization", `Bearer ${accessToken}`);
+        return api(originalRequest);
       }
+
+      authHandlers.clearAuth();
     }
-    
+
     return Promise.reject(error);
   }
 );
 
-// Tipos de erro da API
 export interface APIError {
   detail: string;
   status_code?: number;

@@ -65,3 +65,7 @@ Thumbs.db
 *.xlsx
 uploads/
 exports/
+node_modules/
+.next/
+*.tsbuildinfo
+.ruff_cache/
