@@ -1,12 +1,11 @@
 """Router de marcações de ponto."""
 
 from datetime import datetime, timedelta
-from decimal import Decimal
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, select, update
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,7 +22,6 @@ from app.models import (
     AuditoriaDecisao,
     MarcacaoPonto,
     MarcacaoStatus,
-    Perimetro,
     Usuario,
     UserRole,
 )
@@ -37,12 +35,16 @@ from app.schemas import (
     MarcacaoCreate,
     MarcacaoOfflineSync,
     MarcacaoRead,
-    MarcacaoUpdate,
     MarcacaoWithAuditoria,
     PaginatedResponse,
     SuccessResponse,
 )
 from app.schemas.base import BaseSchema
+from app.services.timekeeping import (
+    MarcacaoContext,
+    create_marcacao,
+    create_offline_marcacao_idempotent,
+)
 
 
 router = APIRouter(prefix="/ponto", tags=["Ponto"])
@@ -54,107 +56,30 @@ async def registrar_marcacao(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request,
 ):
-    """
-    Registrar marcação de ponto.
-    
-    - Valida geolocalização (se configurado)
-    - Processa foto e liveness (async)
-    - Gera comprovante com hash
-    """
-    import hashlib
-    from app.services.geo import geo_service, GeoPoint
-    
-    # Verificar perímetro (geofencing)
-    perimetro_id = None
-    suspeita = False
-    geo_valido = True
-    
-    if data.latitude and data.longitude:
-        # Validar localização usando serviço de geo
-        ponto = GeoPoint(
-            latitude=data.latitude,
-            longitude=data.longitude,
-            accuracy_metros=float(data.accuracy_metros) if data.accuracy_metros else None,
-        )
-        
-        resultado_geo = await geo_service.validar_localizacao(
-            db=db,
-            ponto=ponto,
-            usuario_id=current_user.id,
+    """Registrar marcacao de ponto online com regras compartilhadas."""
+    marcacao = await create_marcacao(
+        db,
+        data,
+        MarcacaoContext(
             tenant_id=tenant.tenant_id,
-        )
-        
-        geo_valido = resultado_geo.valido
-        perimetro_id = resultado_geo.perimetro_id
-        suspeita = not geo_valido
-    
-    # Verificar última marcação para detectar teletransporte
-    result = await db.execute(
-        select(MarcacaoPonto)
-        .where(
-            MarcacaoPonto.usuario_id == current_user.id,
-            MarcacaoPonto.tenant_id == tenant.tenant_id,
-        )
-        .order_by(MarcacaoPonto.timestamp_local.desc())
-        .limit(1)
+            usuario_id=current_user.id,
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent", "")[:500],
+            origem="api",
+        ),
+        modo="online",
     )
-    ultima_marcacao = result.scalar_one_or_none()
-    
-    if ultima_marcacao and data.latitude and data.longitude and ultima_marcacao.latitude and ultima_marcacao.longitude:
-        ponto_anterior = GeoPoint(
-            latitude=ultima_marcacao.latitude,
-            longitude=ultima_marcacao.longitude,
-        )
-        ponto_atual = GeoPoint(
-            latitude=data.latitude,
-            longitude=data.longitude,
-        )
-        intervalo = (data.timestamp_local - ultima_marcacao.timestamp_local).total_seconds()
-        
-        if intervalo > 0:
-            teletransporte, velocidade = geo_service.detectar_teletransporte(
-                ponto_anterior=ponto_anterior,
-                ponto_atual=ponto_atual,
-                intervalo_segundos=intervalo,
-            )
-            if teletransporte:
-                suspeita = True
-    
-    # Criar marcação
-    marcacao = MarcacaoPonto(
-        tenant_id=tenant.tenant_id,
-        usuario_id=current_user.id,
-        dispositivo_id=data.dispositivo_id,
-        perimetro_id=perimetro_id,
-        tipo=data.tipo,
-        evento=data.evento,
-        timestamp_local=data.timestamp_local,
-        timezone=data.timezone,
-        latitude=data.latitude,
-        longitude=data.longitude,
-        accuracy_metros=data.accuracy_metros,
-        modo=data.modo,
-        status=MarcacaoStatus.PENDENTE,
-        suspeita=suspeita,
-        evidencias=data.liveness_data,
-    )
-    
-    # Gerar hash do comprovante
-    comprovante_data = f"{current_user.id}|{data.evento}|{data.timestamp_local.isoformat()}"
-    marcacao.comprovante_hash = hashlib.sha256(comprovante_data.encode()).hexdigest()
-    
-    db.add(marcacao)
     await db.commit()
     await db.refresh(marcacao)
-    
-    # Disparar task async para processar auditoria
+
     from app.tasks.auditoria import processar_auditoria_marcacao
     processar_auditoria_marcacao.delay(
         marcacao_id=str(marcacao.id),
         tenant_id=str(tenant.tenant_id),
     )
-    
+
     return MarcacaoRead.model_validate(marcacao)
 
 
@@ -164,52 +89,27 @@ async def sync_marcacoes_offline(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request,
 ):
-    """
-    Sincronizar marcações offline.
-    
-    Recebe lote de marcações feitas offline e processa.
-    """
-    marcacoes_criadas = []
-    
+    """Sincronizar marcacoes offline com idempotencia garantida no banco."""
+    marcacoes = []
+    context = MarcacaoContext(
+        tenant_id=tenant.tenant_id,
+        usuario_id=current_user.id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent", "")[:500],
+        origem="offline_sync",
+    )
+
     for marcacao_data in data.marcacoes:
-        # Verificar duplicata pelo sync_id
-        if marcacao_data.sync_id:
-            result = await db.execute(
-                select(MarcacaoPonto).where(
-                    MarcacaoPonto.tenant_id == tenant.tenant_id,
-                    MarcacaoPonto.usuario_id == current_user.id,
-                    MarcacaoPonto.evidencias.contains({"sync_id": marcacao_data.sync_id}),
-                )
-            )
-            if result.scalar_one_or_none():
-                continue  # Já sincronizado
-        
-        marcacao = MarcacaoPonto(
-            tenant_id=tenant.tenant_id,
-            usuario_id=current_user.id,
-            dispositivo_id=marcacao_data.dispositivo_id,
-            tipo=marcacao_data.tipo,
-            evento=marcacao_data.evento,
-            timestamp_local=marcacao_data.timestamp_local,
-            timezone=marcacao_data.timezone,
-            latitude=marcacao_data.latitude,
-            longitude=marcacao_data.longitude,
-            accuracy_metros=marcacao_data.accuracy_metros,
-            modo="offline",
-            status=MarcacaoStatus.PENDENTE,
-            evidencias={"sync_id": marcacao_data.sync_id} if marcacao_data.sync_id else None,
-        )
-        
-        db.add(marcacao)
-        marcacoes_criadas.append(marcacao)
-    
+        marcacao = await create_offline_marcacao_idempotent(db, marcacao_data, context)
+        marcacoes.append(marcacao)
+
     await db.commit()
-    
-    for m in marcacoes_criadas:
-        await db.refresh(m)
-    
-    return [MarcacaoRead.model_validate(m) for m in marcacoes_criadas]
+    for marcacao in marcacoes:
+        await db.refresh(marcacao)
+
+    return [MarcacaoRead.model_validate(m) for m in marcacoes]
 
 
 @router.get("/marcacoes", response_model=PaginatedResponse[MarcacaoRead])
@@ -781,7 +681,7 @@ async def registrar_ponto_web(
     geo_mensagem = ""
     distancia_metros = None
     
-    if data.latitude and data.longitude:
+    if data.latitude is not None and data.longitude is not None:
         ponto = GeoPoint(
             latitude=data.latitude,
             longitude=data.longitude,
@@ -886,7 +786,7 @@ async def registrar_ponto_web(
         timezone="America/Sao_Paulo",
         latitude=data.latitude,
         longitude=data.longitude,
-        accuracy_metros=int(data.precisao_gps) if data.precisao_gps else None,
+        accuracy_metros=int(data.precisao_gps) if data.precisao_gps is not None else None,
         modo="online",
         status=MarcacaoStatus.PENDENTE,
         suspeita=suspeita,

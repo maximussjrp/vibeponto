@@ -144,8 +144,7 @@ class GeoService:
             # Perímetros do usuário ou da equipe
             query = query.where(
                 (Perimetro.usuario_id == usuario_id) |
-                (Perimetro.equipe_id == equipe_id) |
-                (Perimetro.global_tenant == True)
+                (Perimetro.equipe_id == equipe_id)
             )
         
         result = await db.execute(query)
@@ -161,7 +160,7 @@ class GeoService:
         melhor_match: Optional[tuple[Perimetro, float, bool]] = None
         
         for perimetro in perimetros:
-            if perimetro.tipo_geometria == "circulo" or (perimetro.centro_lat and perimetro.centro_lng):
+            if perimetro.centro_lat is not None and perimetro.centro_lng is not None:
                 # Validação circular
                 centro = GeoPoint(
                     latitude=perimetro.centro_lat,
@@ -191,23 +190,6 @@ class GeoService:
                 if melhor_match is None or distancia < melhor_match[1]:
                     melhor_match = (perimetro, distancia, False)
             
-            elif perimetro.tipo_geometria == "poligono" and perimetro.poligono_coords:
-                # Validação poligonal
-                vertices = [
-                    GeoPoint(latitude=Decimal(str(v["lat"])), longitude=Decimal(str(v["lng"])))
-                    for v in perimetro.poligono_coords
-                ]
-                
-                dentro = self.ponto_dentro_poligono(ponto, vertices)
-                
-                if dentro:
-                    return GeoValidationResult(
-                        valido=True,
-                        perimetro_id=perimetro.id,
-                        perimetro_nome=perimetro.nome,
-                        mensagem=f"Dentro do perímetro '{perimetro.nome}'",
-                    )
-        
         # Nenhum perímetro válido
         if melhor_match:
             perimetro, distancia, _ = melhor_match
