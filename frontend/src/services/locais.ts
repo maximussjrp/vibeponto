@@ -15,6 +15,7 @@ export interface Perimetro {
   latitude: number;
   longitude: number;
   raio?: number;  // metros, para tipo circulo
+  raio_metros: number;
   coordenadas?: { lat: number; lng: number }[];  // para tipo poligono
   endereco?: string;
   ativo: boolean;
@@ -33,6 +34,7 @@ export interface PerimetroCreate {
   latitude: number;
   longitude: number;
   raio?: number;
+  raio_metros: number;
   coordenadas?: { lat: number; lng: number }[];
   endereco?: string;
   tolerancia_metros?: number;
@@ -47,6 +49,7 @@ export interface PerimetroUpdate {
   latitude?: number;
   longitude?: number;
   raio?: number;
+  raio_metros: number;
   coordenadas?: { lat: number; lng: number }[];
   endereco?: string;
   ativo?: boolean;
@@ -70,6 +73,14 @@ export interface ValidacaoGeo {
   distancia_metros?: number;
 }
 
+
+function normalizePerimetro(perimetro: Perimetro): Perimetro {
+  return {
+    ...perimetro,
+    raio_metros: perimetro.raio_metros ?? perimetro.raio ?? 100,
+  };
+}
+
 // Funções de API
 export const locaisService = {
   /**
@@ -77,7 +88,7 @@ export const locaisService = {
    */
   async list(params: ListPerimetrosParams = {}): Promise<PaginatedResponse<Perimetro>> {
     const { data } = await api.get("/geo/perimetros", { params });
-    return data;
+    return { ...data, items: data.items.map(normalizePerimetro) };
   },
 
   /**
@@ -85,7 +96,7 @@ export const locaisService = {
    */
   async get(id: string): Promise<Perimetro> {
     const { data } = await api.get(`/geo/perimetros/${id}`);
-    return data;
+    return normalizePerimetro(data);
   },
 
   /**
@@ -93,7 +104,7 @@ export const locaisService = {
    */
   async create(perimetro: PerimetroCreate): Promise<Perimetro> {
     const { data } = await api.post("/geo/perimetros", perimetro);
-    return data;
+    return normalizePerimetro(data);
   },
 
   /**
@@ -101,7 +112,7 @@ export const locaisService = {
    */
   async update(id: string, perimetro: PerimetroUpdate): Promise<Perimetro> {
     const { data } = await api.patch(`/geo/perimetros/${id}`, perimetro);
-    return data;
+    return normalizePerimetro(data);
   },
 
   /**
@@ -116,7 +127,15 @@ export const locaisService = {
    */
   async toggleAtivo(id: string, ativo: boolean): Promise<Perimetro> {
     const { data } = await api.patch(`/geo/perimetros/${id}`, { ativo });
-    return data;
+    return normalizePerimetro(data);
+  },
+
+  async activate(id: string): Promise<Perimetro> {
+    return this.toggleAtivo(id, true);
+  },
+
+  async deactivate(id: string): Promise<Perimetro> {
+    return this.toggleAtivo(id, false);
   },
 
   /**
@@ -135,11 +154,24 @@ export const locaisService = {
     bairro: string;
     cidade: string;
     estado: string;
+    uf?: string;
     latitude?: number;
     longitude?: number;
   }> {
     const { data } = await api.get(`/geo/cep/${cep}`);
-    return data;
+    return { ...data, uf: data.uf || data.estado };
+  },
+
+  async lookupCep(cep: string): Promise<{
+    logradouro: string;
+    bairro: string;
+    cidade: string;
+    estado: string;
+    uf?: string;
+    latitude?: number;
+    longitude?: number;
+  }> {
+    return this.buscarCEP(cep);
   },
 
   /**

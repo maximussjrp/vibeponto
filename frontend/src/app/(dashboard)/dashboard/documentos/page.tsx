@@ -93,7 +93,9 @@ const TIPO_LABELS: Record<DocumentoTipo, string> = {
   declaracao: "Declaração",
   comprovante: "Comprovante",
   contrato: "Contrato",
+  termo: "Termo",
   outro: "Outro",
+  outros: "Outros",
 };
 
 const uploadSchema = z.object({
@@ -373,7 +375,7 @@ export default function DocumentosPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.items.map((doc) => (
+              {data.items.map((doc: Documento) => (
                 <TableRow key={doc.id}>
                   <TableCell>
                     <div className="flex items-center gap-3">

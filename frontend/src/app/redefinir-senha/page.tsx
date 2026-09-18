@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -37,7 +37,7 @@ const senhaSchema = z.object({
 
 type SenhaForm = z.infer<typeof senhaSchema>;
 
-export default function RedefinirSenhaPage() {
+function RedefinirSenhaContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
@@ -293,5 +293,25 @@ export default function RedefinirSenhaPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+
+export default function RedefinirSenhaPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 p-4">
+        <Card className="w-full max-w-md">
+          <CardContent className="pt-6">
+            <div className="flex flex-col items-center text-center">
+              <Loader2 className="w-12 h-12 animate-spin text-primary mb-4" />
+              <p className="text-muted-foreground">Carregando...</p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    }>
+      <RedefinirSenhaContent />
+    </Suspense>
   );
 }

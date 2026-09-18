@@ -55,6 +55,13 @@ export interface AtividadeRecente {
   timestamp: string;
 }
 
+
+export interface DashboardCharts {
+  weekly_presence: { name: string; presentes: number; ausentes: number }[];
+  team_distribution: { name: string; value: number }[];
+  hourly_distribution: { hora: string; marcacoes: number }[];
+}
+
 // Funções de API
 export const dashboardService = {
   /**
@@ -87,6 +94,27 @@ export const dashboardService = {
   async getDistribuicaoEquipes(): Promise<GraficoDistribuicao[]> {
     const { data } = await api.get("/dashboard/graficos/distribuicao-equipes");
     return data;
+  },
+
+
+  async getCharts(): Promise<DashboardCharts> {
+    const [marcacoes, equipes] = await Promise.all([
+      this.getMarcacoesSemana(),
+      this.getDistribuicaoEquipes(),
+    ]);
+
+    return {
+      weekly_presence: marcacoes.map((item) => ({
+        name: item.data,
+        presentes: item.entradas,
+        ausentes: Math.max(0, item.saidas - item.entradas),
+      })),
+      team_distribution: equipes.map((item) => ({
+        name: item.equipe,
+        value: item.total,
+      })),
+      hourly_distribution: [],
+    };
   },
 
   /**

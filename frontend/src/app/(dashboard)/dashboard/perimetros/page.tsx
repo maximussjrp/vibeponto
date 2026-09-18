@@ -450,7 +450,7 @@ export default function PerimetrosMapaPage() {
       raio_metros: 100,
     });
     setPolygonPoints([]);
-    toast.info('Clique no mapa para definir o centro do círculo');
+    toast('Clique no mapa para definir o centro do círculo', { icon: "i" });
   };
 
   // Iniciar desenho de polígono
@@ -461,7 +461,7 @@ export default function PerimetrosMapaPage() {
       coordenadas: [],
     });
     setPolygonPoints([]);
-    toast.info('Clique no mapa para adicionar pontos. Clique no primeiro ponto para fechar.');
+    toast('Clique no mapa para adicionar pontos. Clique no primeiro ponto para fechar.', { icon: "i" });
   };
 
   // Handler de clique no mapa

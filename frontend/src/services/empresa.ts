@@ -78,6 +78,24 @@ export interface ConfiguracoesIntegracoes {
   api_folha_token?: string;
 }
 
+
+export interface Configuracoes {
+  tolerancia_atraso_minutos: number;
+  tolerancia_saida_antecipada_minutos: number;
+  horas_jornada_padrao: number;
+  intervalo_almoco_minutos: number;
+  permite_ponto_fora_perimetro: boolean;
+  exige_foto_ponto: boolean;
+  exige_geolocalizacao: boolean;
+  notificar_atrasos: boolean;
+  notificar_horas_extras: boolean;
+  dias_retroativos_correcao: number;
+  aprovacao_automatica: boolean;
+  fuso_horario: string;
+}
+
+export type ConfiguracoesUpdate = Partial<Configuracoes>;
+
 // Funções de API
 export const empresaService = {
   /**
@@ -88,11 +106,29 @@ export const empresaService = {
     return data;
   },
 
+  async getTenant(): Promise<Tenant> {
+    return this.get();
+  },
+
   /**
    * Atualizar dados da empresa
    */
   async update(tenant: TenantUpdate): Promise<Tenant> {
     const { data } = await api.patch("/tenant", tenant);
+    return data;
+  },
+
+  async updateTenant(tenant: TenantUpdate): Promise<Tenant> {
+    return this.update(tenant);
+  },
+
+  async getConfiguracoes(): Promise<Configuracoes> {
+    const { data } = await api.get("/configuracoes");
+    return data;
+  },
+
+  async updateConfiguracoes(config: ConfiguracoesUpdate): Promise<Configuracoes> {
+    const { data } = await api.patch("/configuracoes", config);
     return data;
   },
 

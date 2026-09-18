@@ -9,14 +9,17 @@ export interface DiaEspelho {
   data: string;
   dia_semana: string;
   marcacoes: {
-    tipo: string;
-    horario: string;
-    status: string;
+    tipo?: string;
+    evento?: string;
+    horario?: string;
+    timestamp_local: string;
+    status?: string;
   }[];
   horas_trabalhadas: string;
   horas_extras: string;
   horas_faltantes: string;
   observacao?: string;
+  observacoes?: string[];
   feriado?: string;
   afastamento?: string;
 }
@@ -46,6 +49,12 @@ export interface EspelhoPonto {
     horas_noturnas: string;
   };
   dias: DiaEspelho[];
+  usuario_nome?: string;
+  usuario_matricula?: string;
+  total_horas_trabalhadas?: string;
+  total_horas_extras?: string;
+  total_horas_falta?: string;
+  total_dias_trabalhados?: number;
   assinatura_funcionario?: {
     data: string;
     ip?: string;
@@ -84,6 +93,23 @@ function getMonthPeriod(mes: number, ano: number) {
   };
 }
 
+
+function normalizeEspelho(espelho: EspelhoPonto): EspelhoPonto {
+  return {
+    ...espelho,
+    usuario_nome: espelho.usuario_nome || espelho.usuario?.nome,
+    usuario_matricula: espelho.usuario_matricula || espelho.usuario?.matricula,
+    total_horas_trabalhadas: espelho.total_horas_trabalhadas || espelho.resumo?.horas_trabalhadas,
+    total_horas_extras: espelho.total_horas_extras || espelho.resumo?.horas_extras,
+    total_horas_falta: espelho.total_horas_falta || espelho.resumo?.horas_faltantes,
+    total_dias_trabalhados: espelho.total_dias_trabalhados ?? espelho.resumo?.dias_trabalhados,
+    dias: espelho.dias.map((dia) => ({
+      ...dia,
+      observacoes: dia.observacoes || (dia.observacao ? [dia.observacao] : []),
+    })),
+  };
+}
+
 // Funções de API
 export const espelhoService = {
   /**
@@ -95,7 +121,7 @@ export const espelhoService = {
     const { data } = await api.get("/ponto/espelho", { 
       params: { usuario_id, ...periodo } 
     });
-    return data;
+    return normalizeEspelho(data);
   },
 
   /**
@@ -109,7 +135,7 @@ export const espelhoService = {
     });
     // O backend retorna um único espelho, então encapsulamos
     return {
-      items: data ? [data] : [],
+      items: data ? [normalizeEspelho(data)] : [],
       total: data ? 1 : 0,
     };
   },
@@ -145,7 +171,7 @@ export const espelhoService = {
    */
   async meuEspelho(mes?: number, ano?: number): Promise<EspelhoPonto> {
     const { data } = await api.get("/espelho/meu", { params: { mes, ano } });
-    return data;
+    return normalizeEspelho(data);
   },
 
   /**

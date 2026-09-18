@@ -12,6 +12,8 @@ export interface Marcacao {
   tenant_id: string;
   tipo: "entrada" | "saida" | "intervalo_inicio" | "intervalo_fim";
   timestamp: string;
+  timestamp_local?: string;
+  data_hora: string;
   latitude?: number;
   longitude?: number;
   endereco?: string;
@@ -21,6 +23,7 @@ export interface Marcacao {
   ip_address?: string;
   device_id?: string;
   device_info?: string;
+  dispositivo?: string;
   status: "pendente" | "aprovado" | "rejeitado" | "corrigido";
   observacao?: string;
   offline_sync: boolean;
@@ -31,6 +34,8 @@ export interface Marcacao {
     id: string;
     nome: string;
     matricula: string;
+    foto_url?: string;
+    foto_base_url?: string;
   };
 }
 
@@ -41,29 +46,51 @@ export interface MarcacaoCreate {
   foto_base64?: string;
   device_id?: string;
   device_info?: string;
+  dispositivo?: string;
   observacao?: string;
   offline?: boolean;
   offline_timestamp?: string;
 }
 
+export type CorrecaoStatus = "pendente" | "aprovada" | "rejeitada";
+
 export interface CorrecaoRequest {
-  marcacao_id: string;
-  novo_timestamp: string;
-  motivo: string;
+  marcacao_id?: string;
+  usuario_id?: string;
+  tipo_marcacao?: string;
+  novo_timestamp?: string;
+  motivo?: string;
+  data_hora_original?: string;
+  data_hora_corrigida?: string;
+  justificativa?: string;
 }
+
+export type CorrecaoCreate = CorrecaoRequest;
 
 export interface Correcao {
   id: string;
-  marcacao_id: string;
-  solicitante_id: string;
+  marcacao_id?: string;
+  solicitante_id?: string;
+  usuario_id?: string;
   aprovador_id?: string;
-  timestamp_original: string;
-  timestamp_novo: string;
-  motivo: string;
-  status: "pendente" | "aprovado" | "rejeitado";
+  tipo_marcacao: string;
+  timestamp_original?: string;
+  timestamp_novo?: string;
+  data_hora_original?: string;
+  data_hora_corrigida: string;
+  motivo?: string;
+  justificativa: string;
+  status: CorrecaoStatus;
   observacao_aprovador?: string;
   created_at: string;
   updated_at: string;
+  usuario?: {
+    id: string;
+    nome: string;
+    matricula?: string;
+    foto_url?: string;
+    foto_base_url?: string;
+  };
 }
 
 export interface Comprovante {
@@ -86,12 +113,67 @@ export interface ListMarcacoesParams {
   data_fim?: string;
   status?: string;
   tipo?: string;
+  q?: string;
 }
 
 export interface ListCorrecoesParams {
   page?: number;
   per_page?: number;
   status?: string;
+}
+
+
+function normalizeMarcacao(marcacao: Marcacao): Marcacao {
+  return {
+    ...marcacao,
+    data_hora: marcacao.data_hora || marcacao.timestamp_local || marcacao.timestamp || marcacao.created_at,
+    dispositivo: marcacao.dispositivo || marcacao.device_info || marcacao.device_id || "Web",
+    usuario: marcacao.usuario
+      ? {
+          ...marcacao.usuario,
+          foto_url: marcacao.usuario.foto_url || marcacao.usuario.foto_base_url,
+        }
+      : marcacao.usuario,
+  };
+}
+
+function normalizeMarcacaoPage(response: PaginatedResponse<Marcacao>): PaginatedResponse<Marcacao> {
+  return {
+    ...response,
+    items: response.items.map(normalizeMarcacao),
+  };
+}
+
+
+function normalizeCorrecao(correcao: Correcao): Correcao {
+  const statusMap: Record<string, CorrecaoStatus> = {
+    pendente: "pendente",
+    aprovado: "aprovada",
+    aprovada: "aprovada",
+    rejeitado: "rejeitada",
+    rejeitada: "rejeitada",
+  };
+  return {
+    ...correcao,
+    tipo_marcacao: correcao.tipo_marcacao || "entrada",
+    data_hora_original: correcao.data_hora_original || correcao.timestamp_original,
+    data_hora_corrigida: correcao.data_hora_corrigida || correcao.timestamp_novo || correcao.created_at,
+    justificativa: correcao.justificativa || correcao.motivo || "-",
+    status: statusMap[correcao.status] || "pendente",
+    usuario: correcao.usuario
+      ? {
+          ...correcao.usuario,
+          foto_url: correcao.usuario.foto_url || correcao.usuario.foto_base_url,
+        }
+      : correcao.usuario,
+  };
+}
+
+function normalizeCorrecaoPage(response: PaginatedResponse<Correcao>): PaginatedResponse<Correcao> {
+  return {
+    ...response,
+    items: response.items.map(normalizeCorrecao),
+  };
 }
 
 // Funções de API
@@ -101,7 +183,7 @@ export const pontoService = {
    */
   async registrar(marcacao: MarcacaoCreate): Promise<Marcacao> {
     const { data } = await api.post("/ponto/marcacoes", marcacao);
-    return data;
+    return normalizeMarcacao(data);
   },
 
   /**
@@ -109,7 +191,7 @@ export const pontoService = {
    */
   async listMarcacoes(params: ListMarcacoesParams = {}): Promise<PaginatedResponse<Marcacao>> {
     const { data } = await api.get("/ponto/marcacoes", { params });
-    return data;
+    return normalizeMarcacaoPage(data);
   },
 
   /**
@@ -117,7 +199,7 @@ export const pontoService = {
    */
   async getMarcacao(id: string): Promise<Marcacao> {
     const { data } = await api.get(`/ponto/marcacoes/${id}`);
-    return data;
+    return normalizeMarcacao(data);
   },
 
   /**
@@ -125,23 +207,37 @@ export const pontoService = {
    */
   async minhasMarcacoesHoje(): Promise<Marcacao[]> {
     const { data } = await api.get("/ponto/minhas-marcacoes/hoje");
-    return data;
+    return data.map(normalizeMarcacao);
   },
 
   /**
    * Solicitar correção de marcação
    */
   async solicitarCorrecao(correcao: CorrecaoRequest): Promise<Correcao> {
-    const { data } = await api.post("/ponto/correcoes", correcao);
-    return data;
+    const payload = {
+      ...correcao,
+      marcacao_id: correcao.marcacao_id || "",
+      novo_timestamp: correcao.novo_timestamp || correcao.data_hora_corrigida,
+      motivo: correcao.motivo || correcao.justificativa,
+    };
+    const { data } = await api.post("/ponto/correcoes", payload);
+    return normalizeCorrecao(data);
+  },
+
+  async createCorrecao(correcao: CorrecaoCreate): Promise<Correcao> {
+    return this.solicitarCorrecao(correcao);
   },
 
   /**
    * Listar correções pendentes
    */
   async listCorrecoes(params: ListCorrecoesParams = {}): Promise<PaginatedResponse<Correcao>> {
-    const { data } = await api.get("/ponto/correcoes", { params });
-    return data;
+    const apiParams = {
+      ...params,
+      status: params.status === "aprovada" ? "aprovado" : params.status === "rejeitada" ? "rejeitado" : params.status,
+    };
+    const { data } = await api.get("/ponto/correcoes", { params: apiParams });
+    return normalizeCorrecaoPage(data);
   },
 
   /**
@@ -149,7 +245,7 @@ export const pontoService = {
    */
   async aprovarCorrecao(id: string, observacao?: string): Promise<Correcao> {
     const { data } = await api.post(`/ponto/correcoes/${id}/aprovar`, { observacao });
-    return data;
+    return normalizeCorrecao(data);
   },
 
   /**
@@ -157,7 +253,7 @@ export const pontoService = {
    */
   async rejeitarCorrecao(id: string, observacao: string): Promise<Correcao> {
     const { data } = await api.post(`/ponto/correcoes/${id}/rejeitar`, { observacao });
-    return data;
+    return normalizeCorrecao(data);
   },
 
   /**
