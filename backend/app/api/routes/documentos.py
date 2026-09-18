@@ -239,12 +239,8 @@ async def download_documento(
     # Gerar URL pré-assinada
     storage = get_storage_service()
     
-    # Extrair key da URL
-    key = documento.arquivo_url.split("/")[-1] if "/" in documento.arquivo_url else documento.arquivo_url
-    full_key = f"{tenant.tenant_id}/documentos/{key}"
-    
     url = await storage.get_presigned_url(
-        key=full_key,
+        key=documento.arquivo_url,
         expires_in=3600,
         download_filename=documento.arquivo_nome,
     )

@@ -1,15 +1,23 @@
 """Serviço de armazenamento de arquivos (MinIO/S3)."""
 
 import hashlib
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
+from pathlib import PurePath
 from uuid import UUID, uuid4
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from fastapi import HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+
+ALLOWED_UPLOADS = {
+    "application/pdf": {".pdf": b"%PDF"},
+    "image/jpeg": {".jpg": b"\xff\xd8\xff", ".jpeg": b"\xff\xd8\xff"},
+    "image/png": {".png": b"\x89PNG\r\n\x1a\n"},
+}
 
 
 class StorageService:
@@ -35,8 +43,7 @@ class StorageService:
             config=Config(signature_version="s3v4"),
         )
         
-        # Garantir que o bucket existe
-        self._ensure_bucket()
+        self._bucket_checked = False
     
     def _ensure_bucket(self):
         """Cria o bucket se não existir."""
@@ -54,10 +61,37 @@ class StorageService:
     ) -> str:
         """Gera chave única para o arquivo."""
         if add_uuid:
-            ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
+            safe_name = PurePath(filename).name
+            ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
             unique_name = f"{uuid4()}.{ext}" if ext else str(uuid4())
             return f"{tenant_id}/{folder}/{unique_name}"
-        return f"{tenant_id}/{folder}/{filename}"
+        return f"{tenant_id}/{folder}/{PurePath(filename).name}"
+
+    async def _ensure_bucket_async(self):
+        if not self._bucket_checked:
+            await run_in_threadpool(self._ensure_bucket)
+            self._bucket_checked = True
+
+    def _validate_upload(self, filename: str, content: bytes, content_type: str, folder: str) -> str:
+        safe_name = PurePath(filename).name
+        ext = f".{safe_name.rsplit('.', 1)[-1].lower()}" if "." in safe_name else ""
+        max_size = settings.upload_image_max_size_bytes if folder == "pontos" else settings.upload_max_size_bytes
+        if len(content) > max_size:
+            raise HTTPException(status_code=413, detail="Arquivo excede o tamanho maximo permitido")
+        signatures = ALLOWED_UPLOADS.get(content_type)
+        if not signatures or ext not in signatures:
+            raise HTTPException(status_code=400, detail="Tipo de arquivo nao permitido")
+        if not content.startswith(signatures[ext]):
+            raise HTTPException(status_code=400, detail="Conteudo do arquivo nao corresponde ao tipo declarado")
+        return safe_name
+
+    def _validate_declared_type(self, filename: str, content_type: str) -> str:
+        safe_name = PurePath(filename).name
+        ext = f".{safe_name.rsplit('.', 1)[-1].lower()}" if "." in safe_name else ""
+        signatures = ALLOWED_UPLOADS.get(content_type)
+        if not signatures or ext not in signatures:
+            raise HTTPException(status_code=400, detail="Tipo de arquivo nao permitido")
+        return safe_name
     
     async def upload_file(
         self,
@@ -72,13 +106,16 @@ class StorageService:
         
         Retorna dict com url, key, hash e tamanho.
         """
+        filename = self._validate_upload(filename, content, content_type, folder)
         key = self._generate_key(tenant_id, folder, filename)
         
         # Calcular hash
         file_hash = hashlib.sha256(content).hexdigest()
         
         # Upload
-        self.client.put_object(
+        await self._ensure_bucket_async()
+        await run_in_threadpool(
+            self.client.put_object,
             Bucket=self.bucket,
             Key=key,
             Body=content,
@@ -91,7 +128,7 @@ class StorageService:
         )
         
         # Gerar URL (pode ser pré-assinada ou pública)
-        url = self._get_url(key)
+        url = key
         
         return {
             "key": key,
@@ -121,13 +158,13 @@ class StorageService:
     
     async def download_file(self, key: str) -> bytes:
         """Download de arquivo."""
-        response = self.client.get_object(Bucket=self.bucket, Key=key)
-        return response["Body"].read()
+        response = await run_in_threadpool(self.client.get_object, Bucket=self.bucket, Key=key)
+        return await run_in_threadpool(response["Body"].read)
     
     async def delete_file(self, key: str) -> bool:
         """Deletar arquivo."""
         try:
-            self.client.delete_object(Bucket=self.bucket, Key=key)
+            await run_in_threadpool(self.client.delete_object, Bucket=self.bucket, Key=key)
             return True
         except ClientError:
             return False
@@ -135,24 +172,16 @@ class StorageService:
     async def file_exists(self, key: str) -> bool:
         """Verifica se arquivo existe."""
         try:
-            self.client.head_object(Bucket=self.bucket, Key=key)
+            await run_in_threadpool(self.client.head_object, Bucket=self.bucket, Key=key)
             return True
         except ClientError:
             return False
-    
-    def _get_url(self, key: str, expires_in: int = 3600) -> str:
-        """Gera URL pré-assinada para acesso ao arquivo."""
-        return self.client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.bucket, "Key": key},
-            ExpiresIn=expires_in,
-        )
     
     async def get_presigned_url(
         self,
         key: str,
         expires_in: int = 3600,
-        download_filename: Optional[str] = None,
+        download_filename: str | None = None,
     ) -> str:
         """Gera URL pré-assinada com opção de download."""
         params = {"Bucket": self.bucket, "Key": key}
@@ -160,7 +189,8 @@ class StorageService:
         if download_filename:
             params["ResponseContentDisposition"] = f'attachment; filename="{download_filename}"'
         
-        return self.client.generate_presigned_url(
+        return await run_in_threadpool(
+            self.client.generate_presigned_url,
             "get_object",
             Params=params,
             ExpiresIn=expires_in,
@@ -179,9 +209,10 @@ class StorageService:
         
         Útil para uploads grandes sem passar pelo backend.
         """
+        filename = self._validate_declared_type(filename, content_type)
         key = self._generate_key(tenant_id, folder, filename)
-        
-        url = self.client.generate_presigned_url(
+        url = await run_in_threadpool(
+            self.client.generate_presigned_url,
             "put_object",
             Params={
                 "Bucket": self.bucket,
@@ -199,7 +230,7 @@ class StorageService:
 
 
 # Singleton
-_storage_service: Optional[StorageService] = None
+_storage_service: StorageService | None = None
 
 
 def get_storage_service() -> StorageService:
