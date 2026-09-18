@@ -45,8 +45,8 @@ describe('Utilities', () => {
         }).format(value);
       };
       
-      expect(formatCurrency(1234.56)).toBe('R$ 1.234,56');
-      expect(formatCurrency(0)).toBe('R$ 0,00');
+      expect(formatCurrency(1234.56).replace(/\u00a0/g, ' ')).toBe('R$ 1.234,56');
+      expect(formatCurrency(0).replace(/\u00a0/g, ' ')).toBe('R$ 0,00');
     });
   });
 
@@ -56,7 +56,7 @@ describe('Utilities', () => {
         return new Intl.DateTimeFormat('pt-BR').format(date);
       };
       
-      const date = new Date('2026-01-23');
+      const date = new Date(2026, 0, 23);
       expect(formatDate(date)).toBe('23/01/2026');
     });
   });
