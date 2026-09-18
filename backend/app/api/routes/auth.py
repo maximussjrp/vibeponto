@@ -1,31 +1,35 @@
 """Router de autenticação."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
-from sqlalchemy import select, update
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, get_db
 from app.core.config import settings
-from app.core.sessions import (
-    COOKIE_NAME, check_cookie_origin, clear_refresh_cookie, cookie_mode, digest,
-    issue_tokens, set_refresh_cookie, unauthorized, validate_session,
-)
 from app.core.rate_limit import auth_rate_limit
 from app.core.security import (
-    create_access_token,
-    create_refresh_token,
-    decode_token,
+    encrypt_totp_secret,
     generate_totp_secret,
     get_totp_uri,
     hash_password,
     verify_password,
-    verify_totp,
 )
-from app.models import Usuario, UserStatus, Tenant, UserRole
+from app.core.sessions import (
+    COOKIE_NAME,
+    check_cookie_origin,
+    clear_refresh_cookie,
+    cookie_mode,
+    digest,
+    issue_tokens,
+    set_refresh_cookie,
+    unauthorized,
+    validate_session,
+)
+from app.models import MFABackupCode, Tenant, UserRole, UserStatus, Usuario
 from app.schemas import (
     LoginRequest,
     LoginResponse,
@@ -42,7 +46,7 @@ from app.schemas import (
     TokenResponse,
     UsuarioRead,
 )
-
+from app.services.mfa import generate_backup_codes, replace_backup_codes, verify_mfa_code
 
 router = APIRouter(prefix="/auth", tags=["Autenticação"], dependencies=[Depends(auth_rate_limit)])
 
@@ -212,48 +216,29 @@ async def login(
     response.headers["Cache-Control"] = "no-store"
     # Email is unique per tenant. Never pick one of multiple matching accounts.
     result = await db.execute(
-        select(
-            Usuario.id,
-            Usuario.tenant_id,
-            Usuario.nome,
-            Usuario.email,
-            Usuario.cpf,
-            Usuario.telefone,
-            Usuario.matricula,
-            Usuario.papel,
-            Usuario.status,
-            Usuario.password_hash,
-            Usuario.mfa_enabled,
-            Usuario.mfa_secret,
-            Usuario.foto_base_url,
-            Usuario.equipe_id,
-            Usuario.ultimo_login,
-            Usuario.created_at,
-            Usuario.updated_at,
-        ).where(Usuario.email == request.email,
-                *([Usuario.tenant_id == request.tenant_id] if request.tenant_id else []))
+        select(Usuario)
+        .where(Usuario.email == request.email,
+               *([Usuario.tenant_id == request.tenant_id] if request.tenant_id else []))
         .limit(2)
     )
-    rows = result.all()
-    row = rows[0] if len(rows) == 1 else None
+    rows = result.scalars().all()
+    usuario = rows[0] if len(rows) == 1 else None
     
-    if not row:
+    if not usuario:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciais inválidas",
         )
     
     # Extrair dados do row
-    user_id = row.id
-    tenant_id = row.tenant_id
-    password_hash = row.password_hash
-    user_status = row.status
-    mfa_enabled = row.mfa_enabled
-    mfa_secret = row.mfa_secret
-    papel = row.papel
+    user_id = usuario.id
+    tenant_id = usuario.tenant_id
+    user_status = usuario.status
+    mfa_enabled = usuario.mfa_enabled
+    papel = usuario.papel
     
     # Verificar senha
-    if not verify_password(request.password, password_hash):
+    if not verify_password(request.password, usuario.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciais inválidas",
@@ -276,23 +261,7 @@ async def login(
     if mfa_enabled:
         if not request.mfa_code:
             # Retorna flag para frontend solicitar código
-            user_data = UsuarioRead(
-                id=row.id,
-                tenant_id=row.tenant_id,
-                nome=row.nome,
-                email=row.email,
-                cpf=row.cpf,
-                telefone=row.telefone,
-                matricula=row.matricula,
-                papel=papel,
-                status=user_status,
-                mfa_enabled=mfa_enabled,
-                foto_base_url=row.foto_base_url,
-                equipe_id=row.equipe_id,
-                ultimo_login=row.ultimo_login,
-                created_at=row.created_at or datetime.utcnow(),
-                updated_at=row.updated_at or datetime.utcnow(),
-            )
+            user_data = UsuarioRead.model_validate(usuario)
             return LoginResponse(
                 access_token="",
                 refresh_token="",
@@ -302,7 +271,7 @@ async def login(
             )
         
         # Validar código MFA
-        if not mfa_secret or not verify_totp(mfa_secret, request.mfa_code):
+        if not await verify_mfa_code(db, usuario, request.mfa_code, http_request):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Código MFA inválido",
@@ -323,23 +292,7 @@ async def login(
     await db.commit()
     
     # Construir resposta do usuário com dados do row
-    user_data = UsuarioRead(
-        id=row.id,
-        tenant_id=row.tenant_id,
-        nome=row.nome,
-        email=row.email,
-        cpf=row.cpf,
-        telefone=row.telefone,
-        matricula=row.matricula,
-        papel=papel,
-        status=user_status,
-        mfa_enabled=mfa_enabled,
-        foto_base_url=row.foto_base_url,
-        equipe_id=row.equipe_id,
-        ultimo_login=row.ultimo_login,
-        created_at=row.created_at or datetime.utcnow(),
-        updated_at=row.updated_at or datetime.utcnow(),
-    )
+    user_data = UsuarioRead.model_validate(usuario)
     
     return LoginResponse(
         access_token=access_token,
@@ -382,8 +335,9 @@ async def refresh_token(
 
 @router.post("/logout", response_model=SuccessResponse)
 async def logout(http_request: Request, response: Response):
-    from app.core.redis import get_redis
     from redis.exceptions import RedisError
+
+    from app.core.redis import get_redis
 
     web = cookie_mode(http_request)
     if web:
@@ -458,9 +412,10 @@ async def request_password_reset(
     
     Envia email com link/token para reset.
     """
-    from app.core.redis import get_redis
-    from app.core.email import email_service
     import secrets
+
+    from app.core.email import email_service
+    from app.core.redis import get_redis
     
     # Buscar usuário
     result = await db.execute(
@@ -556,17 +511,18 @@ async def setup_mfa(
     qr_uri = get_totp_uri(secret, current_user.email)
     
     # Gerar códigos de backup
-    backup_codes = []  # Recovery codes are not implemented; do not issue unusable codes.
+    backup_codes = generate_backup_codes()
     
     # Salvar secret (ainda não habilitado)
     await db.execute(
         update(Usuario)
         .where(Usuario.id == current_user.id)
         .values(
-            mfa_secret=secret,
-            # backup_codes seriam salvos em tabela separada ou campo JSONB
+            mfa_secret=encrypt_totp_secret(secret),
+            mfa_last_totp_step=None,
         )
     )
+    await replace_backup_codes(db, current_user.id, backup_codes)
     await db.commit()
     
     return MFASetupResponse(
@@ -581,6 +537,7 @@ async def verify_mfa_setup(
     request: MFAVerifyRequest,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    http_request: Request,
 ):
     """
     Verificar e ativar MFA.
@@ -600,7 +557,7 @@ async def verify_mfa_setup(
         )
     
     # Verificar código
-    if not verify_totp(usuario.mfa_secret, request.code):
+    if not await verify_mfa_code(db, usuario, request.code, http_request, allow_backup=False):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Código inválido",
@@ -622,6 +579,7 @@ async def disable_mfa(
     request: MFADisableRequest,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    http_request: Request,
 ):
     """Desativar MFA do usuário."""
     
@@ -645,7 +603,7 @@ async def disable_mfa(
         )
     
     # Verificar código MFA
-    if usuario.mfa_secret and not verify_totp(usuario.mfa_secret, request.code):
+    if usuario.mfa_secret and not await verify_mfa_code(db, usuario, request.code, http_request):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Código MFA inválido",
@@ -655,8 +613,9 @@ async def disable_mfa(
     await db.execute(
         update(Usuario)
         .where(Usuario.id == current_user.id)
-        .values(mfa_enabled=False, mfa_secret=None)
+        .values(mfa_enabled=False, mfa_secret=None, mfa_last_totp_step=None)
     )
+    await db.execute(delete(MFABackupCode).where(MFABackupCode.usuario_id == current_user.id))
     await db.commit()
     
     return SuccessResponse(message="MFA desativado com sucesso")

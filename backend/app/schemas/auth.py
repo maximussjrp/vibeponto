@@ -20,7 +20,7 @@ class LoginRequest(BaseSchema):
     email: EmailStr
     tenant_id: Optional[UUID] = None
     password: str = Field(..., min_length=8)
-    mfa_code: Optional[str] = Field(None, min_length=6, max_length=6)
+    mfa_code: Optional[str] = Field(None, min_length=6, max_length=32)
     device_id: Optional[str] = None
     device_info: Optional[dict] = None
 
@@ -102,7 +102,7 @@ class MFADisableRequest(BaseSchema):
     """Request para desabilitar MFA."""
     
     password: str
-    code: str = Field(..., min_length=6, max_length=6)
+    code: str = Field(..., min_length=6, max_length=32)
 
 
 # ============================================================================

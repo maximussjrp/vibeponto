@@ -1,10 +1,13 @@
 """Utilitários de segurança: hashing, JWT, MFA."""
 
+import base64
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
 import bcrypt
+from cryptography.fernet import Fernet, InvalidToken
 from jose import JWTError, jwt
 import pyotp
 
@@ -69,6 +72,29 @@ def generate_totp_secret() -> str:
     return pyotp.random_base32()
 
 
+def _mfa_fernet() -> Fernet:
+    key = hashlib.sha256(settings.mfa_encryption_key.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+def encrypt_totp_secret(secret: str) -> str:
+    """Criptografa segredo TOTP em repouso com versao simples."""
+    token = _mfa_fernet().encrypt(secret.encode("utf-8")).decode("ascii")
+    return f"v1:{token}"
+
+
+def decrypt_totp_secret(value: str) -> str:
+    """Descriptografa segredo TOTP; aceita legado plaintext apenas em development."""
+    if value.startswith("v1:"):
+        try:
+            return _mfa_fernet().decrypt(value[3:].encode("ascii")).decode("utf-8")
+        except InvalidToken:
+            raise ValueError("Invalid MFA secret") from None
+    if settings.environment == "development":
+        return value
+    raise ValueError("Unsupported MFA secret format")
+
+
 def get_totp_uri(secret: str, email: str) -> str:
     """Gera URI para QR Code do TOTP."""
     totp = pyotp.TOTP(secret)
@@ -78,4 +104,4 @@ def get_totp_uri(secret: str, email: str) -> str:
 def verify_totp(secret: str, code: str) -> bool:
     """Verifica código TOTP."""
     totp = pyotp.TOTP(secret)
-    return totp.verify(code)
+    return totp.verify(code, valid_window=1)

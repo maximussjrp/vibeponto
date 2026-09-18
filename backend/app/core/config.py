@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
+    mfa_encryption_key: str = Field(default="", repr=False)
+    mfa_backup_codes_count: int = 10
+    mfa_attempts_limit: int = 5
+    mfa_attempts_window_seconds: int = 300
 
     # Storage (MinIO/S3)
     storage_endpoint: str = "http://localhost:9000"
@@ -57,6 +61,8 @@ class Settings(BaseSettings):
     storage_bucket: str = "vibe-ponto"
     storage_use_ssl: bool = False
     storage_region: str = "us-east-1"
+    upload_max_size_bytes: int = 10 * 1024 * 1024
+    upload_image_max_size_bytes: int = 5 * 1024 * 1024
 
     # Reconhecimento Facial
     facial_provider: str = "mock"  # mock, local, aws, azure
@@ -88,9 +94,13 @@ class Settings(BaseSettings):
                 raise ValueError("Configure SECRET_KEY with a randomly generated secret of at least 32 characters")
             if self.debug or "*" in self.cors_origins:
                 raise ValueError("Disable DEBUG and configure explicit CORS origins outside development")
+            if not self.mfa_encryption_key:
+                raise ValueError("Configure MFA_ENCRYPTION_KEY outside development")
         elif not self.secret_key:
             # Only for a single local process; configure a shared key for multiple workers.
             self.secret_key = secrets.token_urlsafe(48)
+        if not self.mfa_encryption_key:
+            self.mfa_encryption_key = secrets.token_urlsafe(32)
         if not self.celery_result_backend:
             self.celery_result_backend = str(self.redis_url)
         return self
