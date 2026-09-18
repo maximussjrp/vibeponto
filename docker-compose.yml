@@ -93,6 +93,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: dev
     container_name: vibeponto-api
     environment:
       DATABASE_URL: postgresql+asyncpg://vibeponto:vibeponto_dev_123@postgres:5432/vibeponto
@@ -126,6 +127,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      target: dev
     container_name: vibeponto-frontend
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
@@ -148,6 +150,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: dev
     container_name: vibeponto-celery-worker
     environment:
       DATABASE_URL: postgresql+asyncpg://vibeponto:vibeponto_dev_123@postgres:5432/vibeponto
@@ -172,6 +175,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: dev
     container_name: vibeponto-celery-beat
     environment:
       DATABASE_URL: postgresql+asyncpg://vibeponto:vibeponto_dev_123@postgres:5432/vibeponto

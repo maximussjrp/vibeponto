@@ -251,3 +251,23 @@ Documentação completa: http://localhost:8000/docs
 ## 📄 Licença
 
 Proprietário - Vibe Coding © 2025
+## Docker de producao
+
+O `docker-compose.yml` continua sendo o ambiente de desenvolvimento, com bind mounts e comandos `--reload`/`npm run dev`.
+
+Para producao, use `docker-compose.prod.yml`:
+
+```bash
+cp .env.production.example .env.production
+# edite .env.production e substitua todos os valores de exemplo por secrets reais
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+```
+
+Notas importantes:
+
+- `SECRET_KEY` e `MFA_ENCRYPTION_KEY` sao obrigatorios fora de desenvolvimento.
+- `DEBUG` deve permanecer `false` e `CORS_ORIGINS` deve conter apenas origens explicitas.
+- O servico `migrate` executa `alembic upgrade head` antes da API subir.
+- A API, worker e beat usam a imagem `production`, sem bind mount de codigo.
+- O frontend usa `next build` em imagem multi-stage e roda via `node server.js` com `output: 'standalone'`.
+- O compose de producao nao publica Postgres, Redis, RabbitMQ ou MinIO para o host; publique esses servicos apenas atras da sua infraestrutura de rede/backup/observabilidade.

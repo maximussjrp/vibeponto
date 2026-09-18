@@ -1,16 +1,29 @@
-FROM node:20-alpine
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
 
+FROM deps AS dev
+COPY . .
+EXPOSE 3000
+CMD ["npm", "run", "dev"]
+
+FROM deps AS builder
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine AS production
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
 WORKDIR /app
 
-# Install dependencies
-COPY package*.json ./
-RUN npm install
+RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Copy application code
-COPY . .
-
-# Expose port
+USER nextjs
 EXPOSE 3000
-
-# Run the application in dev mode
-CMD ["npm", "run", "dev"]
+CMD ["node", "server.js"]
