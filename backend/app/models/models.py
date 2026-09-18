@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -230,8 +231,9 @@ class Usuario(Base, TimestampMixin):
     
     # Autenticação
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    mfa_secret: Mapped[Optional[str]] = mapped_column(String(32))
+    mfa_secret: Mapped[Optional[str]] = mapped_column(Text)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mfa_last_totp_step: Mapped[Optional[int]] = mapped_column(Integer)
     
     # Status e papel
     papel: Mapped[UserRole] = mapped_column(String(20), default=UserRole.COLABORADOR)
@@ -432,6 +434,14 @@ class MarcacaoPonto(Base, TimestampMixin):
         Index("ix_marcacoes_status", "status"),
         Index("ix_marcacoes_suspeita", "suspeita"),
         Index("ix_marcacoes_geom", "geom", postgresql_using="gist"),
+        Index(
+            "uq_marcacoes_offline_sync",
+            "tenant_id",
+            "usuario_id",
+            "sync_id",
+            unique=True,
+            postgresql_where=text("sync_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -466,6 +476,7 @@ class MarcacaoPonto(Base, TimestampMixin):
     latitude: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 8))
     longitude: Mapped[Optional[Decimal]] = mapped_column(Numeric(11, 8))
     accuracy_metros: Mapped[Optional[int]] = mapped_column(Integer)
+    sync_id: Mapped[Optional[str]] = mapped_column(String(128))
     
     # Modo e status
     modo: Mapped[str] = mapped_column(String(10), default="online")  # online/offline
@@ -490,6 +501,23 @@ class MarcacaoPonto(Base, TimestampMixin):
     # Relacionamentos
     usuario: Mapped["Usuario"] = relationship(back_populates="marcacoes")
     auditoria: Mapped[Optional["Auditoria"]] = relationship(back_populates="marcacao")
+
+
+class MFABackupCode(Base, TimestampMixin):
+    """Backup code MFA armazenado apenas como hash e uso unico."""
+    __tablename__ = "mfa_backup_codes"
+    __table_args__ = (
+        Index("ix_mfa_backup_codes_usuario_unused", "usuario_id", "used_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    usuario_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("usuarios.id"), nullable=False
+    )
+    code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
 # ============================================================================
