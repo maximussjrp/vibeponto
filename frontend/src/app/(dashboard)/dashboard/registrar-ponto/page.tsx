@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import Image from "next/image";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 import { format } from "date-fns";
@@ -440,9 +441,12 @@ export default function RegistrarPontoPage() {
 
                 {capturedPhoto && (
                   <div className="flex items-center justify-center" style={{ minHeight: "320px" }}>
-                    <img
+                    <Image
                       src={capturedPhoto}
                       alt="Foto capturada"
+                      width={640}
+                      height={480}
+                      unoptimized
                       className="w-full h-auto max-h-[400px] object-cover rounded-lg"
                     />
                   </div>

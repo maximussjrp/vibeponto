@@ -233,4 +233,6 @@ export const configuracoesService = {
   },
 };
 
-export default { empresaService, configuracoesService };
+const empresaApi = { empresaService, configuracoesService };
+
+export default empresaApi;
