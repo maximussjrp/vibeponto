@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.observability import record_offline_sync, record_time_entry
 from app.models import MarcacaoPonto, MarcacaoStatus
 from app.schemas import MarcacaoCreate
 from app.services.geo import GeoPoint, geo_service
@@ -141,12 +142,17 @@ async def create_marcacao(
     context: MarcacaoContext,
     modo: str = "online",
 ) -> MarcacaoPonto:
-    values = await build_marcacao_values(db, data, context, modo)
-    marcacao = MarcacaoPonto(**values)
-    db.add(marcacao)
-    await db.flush()
-    await db.refresh(marcacao)
-    return marcacao
+    try:
+        values = await build_marcacao_values(db, data, context, modo)
+        marcacao = MarcacaoPonto(**values)
+        db.add(marcacao)
+        await db.flush()
+        await db.refresh(marcacao)
+        record_time_entry(modo, "success")
+        return marcacao
+    except Exception:
+        record_time_entry(modo, "error")
+        raise
 
 
 async def create_offline_marcacao_idempotent(
@@ -155,29 +161,44 @@ async def create_offline_marcacao_idempotent(
     context: MarcacaoContext,
 ) -> MarcacaoPonto:
     if not data.sync_id:
-        return await create_marcacao(db, data, context, modo="offline")
+        try:
+            marcacao = await create_marcacao(db, data, context, modo="offline")
+            record_offline_sync("success")
+            return marcacao
+        except Exception:
+            record_offline_sync("error")
+            raise
 
-    values = await build_marcacao_values(db, data, context, "offline")
-    stmt = (
-        insert(MarcacaoPonto)
-        .values(**values)
-        .on_conflict_do_nothing(
-            index_elements=["tenant_id", "usuario_id", "sync_id"],
-            index_where=MarcacaoPonto.sync_id.isnot(None),
-        )
-        .returning(MarcacaoPonto.id)
-    )
-    inserted_id = (await db.execute(stmt)).scalar_one_or_none()
-    marcacao_id = inserted_id
-    if marcacao_id is None:
-        result = await db.execute(
-            select(MarcacaoPonto.id).where(
-                MarcacaoPonto.tenant_id == context.tenant_id,
-                MarcacaoPonto.usuario_id == context.usuario_id,
-                MarcacaoPonto.sync_id == data.sync_id,
+    try:
+        values = await build_marcacao_values(db, data, context, "offline")
+        stmt = (
+            insert(MarcacaoPonto)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=["tenant_id", "usuario_id", "sync_id"],
+                index_where=MarcacaoPonto.sync_id.isnot(None),
             )
+            .returning(MarcacaoPonto.id)
         )
-        marcacao_id = result.scalar_one()
+        inserted_id = (await db.execute(stmt)).scalar_one_or_none()
+        marcacao_id = inserted_id
+        if marcacao_id is None:
+            result = await db.execute(
+                select(MarcacaoPonto.id).where(
+                    MarcacaoPonto.tenant_id == context.tenant_id,
+                    MarcacaoPonto.usuario_id == context.usuario_id,
+                    MarcacaoPonto.sync_id == data.sync_id,
+                )
+            )
+            marcacao_id = result.scalar_one()
+            record_offline_sync("duplicate")
+        else:
+            record_offline_sync("success")
+            record_time_entry("offline", "success")
 
-    result = await db.execute(select(MarcacaoPonto).where(MarcacaoPonto.id == marcacao_id))
-    return result.scalar_one()
+        result = await db.execute(select(MarcacaoPonto).where(MarcacaoPonto.id == marcacao_id))
+        return result.scalar_one()
+    except Exception:
+        record_offline_sync("error")
+        record_time_entry("offline", "error")
+        raise

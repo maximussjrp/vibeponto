@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, get_db
 from app.core.config import settings
+from app.core.observability import record_auth_attempt
 from app.core.rate_limit import auth_rate_limit
 from app.core.security import (
     encrypt_totp_secret,
@@ -55,7 +56,7 @@ def generate_slug(nome: str) -> str:
     """Gerar slug a partir do nome da empresa."""
     import re
     import unicodedata
-    
+
     # Normalizar e remover acentos
     slug = unicodedata.normalize('NFKD', nome.lower())
     slug = slug.encode('ASCII', 'ignore').decode('ASCII')
@@ -73,13 +74,13 @@ async def register_tenant(
 ):
     """
     Registrar nova empresa (tenant) no sistema SaaS.
-    
+
     - Cria o tenant com os dados da empresa
     - Cria o usuário administrador inicial
     - Retorna os IDs criados
     """
     from uuid import uuid4
-    
+
     # Verificar se CNPJ já existe
     existing_tenant = await db.execute(
         select(Tenant.id).where(Tenant.cnpj == request.empresa_cnpj)
@@ -89,7 +90,7 @@ async def register_tenant(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="CNPJ já cadastrado no sistema",
         )
-    
+
     # Verificar se email do admin já existe
     existing_user = await db.execute(
         select(Usuario.id).where(Usuario.email == request.admin_email)
@@ -99,7 +100,7 @@ async def register_tenant(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email já cadastrado no sistema",
         )
-    
+
     # Gerar slug único
     base_slug = generate_slug(request.empresa_nome)
     slug = base_slug
@@ -112,7 +113,7 @@ async def register_tenant(
             break
         slug = f"{base_slug}-{counter}"
         counter += 1
-    
+
     # Criar Tenant
     tenant_id = uuid4()
     tenant = Tenant(
@@ -133,12 +134,12 @@ async def register_tenant(
         }
     )
     db.add(tenant)
-    
+
     # Criar usuário admin
     admin_id = uuid4()
     # Gerar matrícula simples para admin
     matricula = f"ADM{str(admin_id)[:8].upper()}"
-    
+
     admin = Usuario(
         id=admin_id,
         tenant_id=tenant_id,
@@ -153,9 +154,9 @@ async def register_tenant(
         mfa_enabled=False,
     )
     db.add(admin)
-    
+
     await db.commit()
-    
+
     return RegisterTenantResponse(
         tenant_id=tenant_id,
         tenant_slug=slug,
@@ -172,12 +173,12 @@ async def check_cnpj_availability(
     """Verificar se CNPJ está disponível."""
     # Limpar CNPJ
     cnpj_clean = ''.join(filter(str.isdigit, cnpj))
-    
+
     result = await db.execute(
         select(Tenant.id, Tenant.nome).where(Tenant.cnpj == cnpj_clean)
     )
     row = result.one_or_none()
-    
+
     return {
         "available": row is None,
         "empresa_nome": row.nome if row else None,
@@ -193,7 +194,7 @@ async def check_slug_availability(
     result = await db.execute(
         select(Tenant.id).where(Tenant.config["slug"].astext == slug)
     )
-    
+
     return {"available": result.scalar_one_or_none() is None}
 
 
@@ -206,7 +207,7 @@ async def login(
 ):
     """
     Autenticar usuário.
-    
+
     - Se MFA habilitado e código não fornecido, retorna requires_mfa=true
     - Se MFA habilitado e código fornecido, valida e retorna tokens
     """
@@ -223,40 +224,42 @@ async def login(
     )
     rows = result.scalars().all()
     usuario = rows[0] if len(rows) == 1 else None
-    
+
     if not usuario:
+        record_auth_attempt("invalid")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciais inválidas",
         )
-    
+
     # Extrair dados do row
     user_id = usuario.id
     tenant_id = usuario.tenant_id
     user_status = usuario.status
     mfa_enabled = usuario.mfa_enabled
     papel = usuario.papel
-    
+
     # Verificar senha
     if not verify_password(request.password, usuario.password_hash):
+        record_auth_attempt("invalid")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciais inválidas",
         )
-    
+
     # Verificar status
     if user_status == UserStatus.SUSPENDED or user_status == "suspended":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Usuário suspenso. Contate o administrador.",
         )
-    
+
     if user_status == UserStatus.INACTIVE or user_status == "inactive":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Usuário inativo.",
         )
-    
+
     # Verificar MFA
     if mfa_enabled:
         if not request.mfa_code:
@@ -269,14 +272,15 @@ async def login(
                 user=user_data,
                 requires_mfa=True,
             )
-        
+
         # Validar código MFA
         if not await verify_mfa_code(db, usuario, request.mfa_code, http_request):
+            record_auth_attempt("invalid")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Código MFA inválido",
             )
-    
+
     # Gerar tokens
     papel_value = papel.value if hasattr(papel, 'value') else papel
     access_token, refresh_token_str, expires = await issue_tokens(user_id, tenant_id, papel_value)
@@ -290,10 +294,11 @@ async def login(
         .values(ultimo_login=datetime.utcnow())
     )
     await db.commit()
-    
+    record_auth_attempt("success")
+
     # Construir resposta do usuário com dados do row
     user_data = UsuarioRead.model_validate(usuario)
-    
+
     return LoginResponse(
         access_token=access_token,
         refresh_token=None if web else refresh_token_str,
@@ -368,26 +373,26 @@ async def change_password(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Alterar senha do usuário autenticado."""
-    
+
     # Buscar usuário
     result = await db.execute(
         select(Usuario).where(Usuario.id == current_user.id)
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     # Verificar senha atual
     if not verify_password(request.current_password, usuario.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Senha atual incorreta",
         )
-    
+
     # Atualizar senha
     await db.execute(
         update(Usuario)
@@ -395,7 +400,7 @@ async def change_password(
         .values(password_hash=hash_password(request.new_password))
     )
     await db.commit()
-    
+
     from app.core.redis import get_redis
     redis = await get_redis()
     await redis.revoke_all_user_sessions(str(current_user.id))
@@ -409,14 +414,14 @@ async def request_password_reset(
 ):
     """
     Solicitar reset de senha.
-    
+
     Envia email com link/token para reset.
     """
     import secrets
 
     from app.core.email import email_service
     from app.core.redis import get_redis
-    
+
     # Buscar usuário
     result = await db.execute(
         select(Usuario).where(Usuario.email == request.email,
@@ -425,12 +430,12 @@ async def request_password_reset(
     )
     users = result.scalars().all()
     usuario = users[0] if len(users) == 1 else None
-    
+
     # Sempre retorna sucesso para não expor se email existe
     if usuario:
         # Gerar token de reset
         token = secrets.token_urlsafe(32)
-        
+
         # Salvar no Redis (1 hora de validade)
         redis = await get_redis()
         await redis.store_password_reset_token(
@@ -438,14 +443,14 @@ async def request_password_reset(
             token=token,
             ttl_seconds=3600,
         )
-        
+
         # Enviar email
         await email_service.send_password_reset(
             email=usuario.email,
             token=token,
             nome=usuario.nome,
         )
-    
+
     return SuccessResponse(
         message="Se o email existir no sistema, um link de recuperação será enviado"
     )
@@ -458,17 +463,17 @@ async def confirm_password_reset(
 ):
     """Confirmar reset de senha com token."""
     from app.core.redis import get_redis
-    
+
     # Verificar token no Redis
     redis = await get_redis()
     user_id = await redis.get_password_reset_user(request.token)
-    
+
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Token inválido ou expirado",
         )
-    
+
     # Atualizar senha
     await db.execute(
         update(Usuario)
@@ -476,13 +481,13 @@ async def confirm_password_reset(
         .values(password_hash=hash_password(request.new_password))
     )
     await db.commit()
-    
+
     # Invalidar token usado
     await redis.invalidate_password_reset_token(request.token)
-    
+
     # Revogar todas as sessões do usuário
     await redis.revoke_all_user_sessions(user_id)
-    
+
     return SuccessResponse(message="Senha redefinida com sucesso")
 
 
@@ -497,7 +502,7 @@ async def setup_mfa(
 ):
     """
     Configurar MFA para o usuário.
-    
+
     Retorna secret e QR code para configurar no app autenticador.
     """
     result = await db.execute(select(Usuario).where(Usuario.id == current_user.id))
@@ -506,13 +511,13 @@ async def setup_mfa(
         raise HTTPException(409, "Desative o MFA atual antes de configurar outro")
     # Gerar novo secret
     secret = generate_totp_secret()
-    
+
     # Gerar URI para QR Code
     qr_uri = get_totp_uri(secret, current_user.email)
-    
+
     # Gerar códigos de backup
     backup_codes = generate_backup_codes()
-    
+
     # Salvar secret (ainda não habilitado)
     await db.execute(
         update(Usuario)
@@ -524,7 +529,7 @@ async def setup_mfa(
     )
     await replace_backup_codes(db, current_user.id, backup_codes)
     await db.commit()
-    
+
     return MFASetupResponse(
         secret=secret,
         qr_code_uri=qr_uri,
@@ -541,7 +546,7 @@ async def verify_mfa_setup(
 ):
     """
     Verificar e ativar MFA.
-    
+
     Usuário deve fornecer código do app autenticador para confirmar setup.
     """
     # Buscar usuário com secret
@@ -549,20 +554,20 @@ async def verify_mfa_setup(
         select(Usuario).where(Usuario.id == current_user.id)
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario or not usuario.mfa_secret:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA não configurado. Execute /mfa/setup primeiro.",
         )
-    
+
     # Verificar código
     if not await verify_mfa_code(db, usuario, request.code, http_request, allow_backup=False):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Código inválido",
         )
-    
+
     # Ativar MFA
     await db.execute(
         update(Usuario)
@@ -570,7 +575,7 @@ async def verify_mfa_setup(
         .values(mfa_enabled=True)
     )
     await db.commit()
-    
+
     return SuccessResponse(message="MFA ativado com sucesso")
 
 
@@ -582,33 +587,33 @@ async def disable_mfa(
     http_request: Request,
 ):
     """Desativar MFA do usuário."""
-    
+
     # Buscar usuário
     result = await db.execute(
         select(Usuario).where(Usuario.id == current_user.id)
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     # Verificar senha
     if not verify_password(request.password, usuario.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Senha incorreta",
         )
-    
+
     # Verificar código MFA
     if usuario.mfa_secret and not await verify_mfa_code(db, usuario, request.code, http_request):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Código MFA inválido",
         )
-    
+
     # Desativar MFA
     await db.execute(
         update(Usuario)
@@ -617,7 +622,7 @@ async def disable_mfa(
     )
     await db.execute(delete(MFABackupCode).where(MFABackupCode.usuario_id == current_user.id))
     await db.commit()
-    
+
     return SuccessResponse(message="MFA desativado com sucesso")
 
 
@@ -627,16 +632,16 @@ async def get_current_user_info(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Obter informações do usuário autenticado."""
-    
+
     result = await db.execute(
         select(Usuario).where(Usuario.id == current_user.id)
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     return UsuarioRead.model_validate(usuario)

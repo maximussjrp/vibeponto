@@ -1,9 +1,8 @@
 """Configurações centralizadas do sistema."""
 
+import secrets
 from functools import lru_cache
 from typing import Literal
-
-import secrets
 
 from pydantic import AliasChoices, Field, PostgresDsn, RedisDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,7 +26,7 @@ class Settings(BaseSettings):
     environment: Literal["development", "staging", "production"] = "development"
     debug: bool = False
     secret_key: str = Field(default="", validation_alias=AliasChoices("SECRET_KEY", "JWT_SECRET_KEY"), repr=False)
-    
+
     # API
     api_prefix: str = "/api/v1"
     allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
@@ -67,7 +66,7 @@ class Settings(BaseSettings):
     # Reconhecimento Facial
     facial_provider: str = "mock"  # mock, local, aws, azure
     facial_threshold: float = 0.6  # Limiar de similaridade (0.0 a 1.0)
-    
+
     # AWS (para Rekognition e S3 em produção)
     aws_region: str = "us-east-1"
     aws_access_key_id: str = ""
@@ -80,6 +79,18 @@ class Settings(BaseSettings):
     # AuditorIA
     auditoria_score_threshold: float = 0.75
     auditoria_auto_approve_threshold: float = 0.90
+
+    # Observability
+    structured_logging: bool = True
+    log_level: str = "INFO"
+    request_id_header: str = "X-Request-ID"
+    metrics_enabled: bool = True
+    otel_enabled: bool = False
+    otel_service_name: str = "vibeponto-api"
+    otel_exporter_otlp_endpoint: str = ""
+    otel_exporter_otlp_headers: str = ""
+    otel_traces_sampler: str = "parentbased_traceidratio"
+    otel_traces_sampler_arg: str = "0.10"
 
     # LGPD
     data_retention_years: int = 5

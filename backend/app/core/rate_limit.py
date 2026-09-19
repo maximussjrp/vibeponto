@@ -5,6 +5,7 @@ import hashlib
 from fastapi import HTTPException, Request
 from redis.exceptions import RedisError
 
+from app.core.observability import record_auth_attempt
 from app.core.redis import get_redis
 
 
@@ -21,4 +22,6 @@ async def auth_rate_limit(request: Request):
     except RedisError:
         raise HTTPException(503, "Serviço de autenticação indisponível") from None
     if not allowed:
+        if request.url.path.endswith("/login"):
+            record_auth_attempt("rate_limited")
         raise HTTPException(429, "Muitas tentativas. Aguarde e tente novamente", headers={"Retry-After": "60"})

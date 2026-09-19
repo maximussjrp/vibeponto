@@ -251,6 +251,34 @@ Documentação completa: http://localhost:8000/docs
 ## 📄 Licença
 
 Proprietário - Vibe Coding © 2025
+
+## Observabilidade
+
+A API expoe tres endpoints operacionais com responsabilidades separadas:
+
+- `/health`: liveness simples. Nao consulta dependencias e deve responder enquanto o processo estiver vivo.
+- `/ready`: readiness. Verifica PostgreSQL e Redis e retorna `503` quando alguma dependencia essencial nao esta pronta.
+- `/metrics`: metricas Prometheus. No `docker-compose.prod.yml`, a API usa apenas `expose` na rede interna; se um proxy publico expuser a API, bloqueie ou restrinja `/metrics` no proxy/rede de monitoramento.
+
+Requests recebem correlation ID pelo header `X-Request-ID`. Valores enviados pelo cliente sao aceitos apenas quando possuem formato e tamanho seguros; caso contrario a API gera um UUID. O mesmo header e devolvido na resposta e tambem entra nos logs.
+
+Logs estruturados em JSON sao habilitados por padrao para containers. Cada log pode incluir `timestamp`, `level`, `service`, `environment`, `logger`, `message`, `request_id`, `trace_id`, `span_id`, metodo HTTP, rota normalizada, status e duracao. Campos sensiveis como `Authorization`, `Cookie`, `password`, `secret`, tokens, TOTP e backup codes sao redigidos quando passados como metadados estruturados. O backend nao loga body de request globalmente.
+
+Metricas HTTP usam apenas labels de baixa cardinalidade: `method`, rota normalizada e `status_code`. Metricas de negocio tambem usam enumeracoes pequenas, por exemplo `source="online|offline"`, `result="success|duplicate|invalid|rate_limited|error"` e `operation="upload|download|delete|presign"`. Nunca use `user_id`, `tenant_id`, `document_id`, `sync_id`, email, CPF, IP, User-Agent completo, URL completa ou object key como label.
+
+OpenTelemetry e opcional. A aplicacao continua funcionando sem collector. Para habilitar exportacao OTLP, configure:
+
+```env
+OTEL_ENABLED=true
+OTEL_SERVICE_NAME=vibeponto-api
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+OTEL_EXPORTER_OTLP_HEADERS=
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=0.10
+```
+
+As instrumentacoes incluem FastAPI, SQLAlchemy, Redis e Celery quando OTel esta ativo. A configuracao permanece vendor-neutral e compativel com collectors/backends como Prometheus, Grafana, Tempo, Jaeger e Loki.
+
 ## Docker de producao
 
 O `docker-compose.yml` continua sendo o ambiente de desenvolvimento, com bind mounts e comandos `--reload`/`npm run dev`.

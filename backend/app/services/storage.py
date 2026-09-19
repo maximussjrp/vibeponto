@@ -1,4 +1,4 @@
-"""Serviço de armazenamento de arquivos (MinIO/S3)."""
+"""Servico de armazenamento de arquivos (MinIO/S3)."""
 
 import hashlib
 from datetime import datetime
@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.core.observability import storage_timer
 
 ALLOWED_UPLOADS = {
     "application/pdf": {".pdf": b"%PDF"},
@@ -22,18 +23,18 @@ ALLOWED_UPLOADS = {
 
 class StorageService:
     """
-    Serviço de armazenamento compatível com S3.
-    
-    Usa MinIO localmente e pode ser substituído por S3 em produção.
+    Servico de armazenamento compativel com S3.
+
+    Usa MinIO localmente e pode ser substituido por S3 em producao.
     """
-    
+
     def __init__(self):
         self.endpoint_url = settings.storage_endpoint
         self.access_key = settings.storage_access_key
         self.secret_key = settings.storage_secret_key
         self.bucket = settings.storage_bucket
         self.region = settings.storage_region
-        
+
         self.client = boto3.client(
             "s3",
             endpoint_url=self.endpoint_url,
@@ -42,16 +43,16 @@ class StorageService:
             region_name=self.region,
             config=Config(signature_version="s3v4"),
         )
-        
+
         self._bucket_checked = False
-    
+
     def _ensure_bucket(self):
-        """Cria o bucket se não existir."""
+        """Cria o bucket se nao existir."""
         try:
             self.client.head_bucket(Bucket=self.bucket)
         except ClientError:
             self.client.create_bucket(Bucket=self.bucket)
-    
+
     def _generate_key(
         self,
         tenant_id: UUID,
@@ -59,7 +60,7 @@ class StorageService:
         filename: str,
         add_uuid: bool = True,
     ) -> str:
-        """Gera chave única para o arquivo."""
+        """Gera chave unica para o arquivo."""
         if add_uuid:
             safe_name = PurePath(filename).name
             ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
@@ -92,7 +93,7 @@ class StorageService:
         if not signatures or ext not in signatures:
             raise HTTPException(status_code=400, detail="Tipo de arquivo nao permitido")
         return safe_name
-    
+
     async def upload_file(
         self,
         tenant_id: UUID,
@@ -103,41 +104,39 @@ class StorageService:
     ) -> dict:
         """
         Upload de arquivo.
-        
+
         Retorna dict com url, key, hash e tamanho.
         """
-        filename = self._validate_upload(filename, content, content_type, folder)
-        key = self._generate_key(tenant_id, folder, filename)
-        
-        # Calcular hash
-        file_hash = hashlib.sha256(content).hexdigest()
-        
-        # Upload
-        await self._ensure_bucket_async()
-        await run_in_threadpool(
-            self.client.put_object,
-            Bucket=self.bucket,
-            Key=key,
-            Body=content,
-            ContentType=content_type,
-            Metadata={
+        with storage_timer("upload"):
+            filename = self._validate_upload(filename, content, content_type, folder)
+            key = self._generate_key(tenant_id, folder, filename)
+
+            file_hash = hashlib.sha256(content).hexdigest()
+
+            await self._ensure_bucket_async()
+            await run_in_threadpool(
+                self.client.put_object,
+                Bucket=self.bucket,
+                Key=key,
+                Body=content,
+                ContentType=content_type,
+                Metadata={
+                    "hash": file_hash,
+                    "original_filename": filename,
+                    "uploaded_at": datetime.utcnow().isoformat(),
+                },
+            )
+
+            url = key
+
+            return {
+                "key": key,
+                "url": url,
                 "hash": file_hash,
-                "original_filename": filename,
-                "uploaded_at": datetime.utcnow().isoformat(),
-            },
-        )
-        
-        # Gerar URL (pode ser pré-assinada ou pública)
-        url = key
-        
-        return {
-            "key": key,
-            "url": url,
-            "hash": file_hash,
-            "size": len(content),
-            "content_type": content_type,
-        }
-    
+                "size": len(content),
+                "content_type": content_type,
+            }
+
     async def upload_base64(
         self,
         tenant_id: UUID,
@@ -148,27 +147,29 @@ class StorageService:
     ) -> dict:
         """Upload de arquivo em base64."""
         import base64
-        
-        # Remover prefixo data:...;base64, se presente
+
         if "," in base64_content:
             base64_content = base64_content.split(",", 1)[1]
-        
+
         content = base64.b64decode(base64_content)
         return await self.upload_file(tenant_id, folder, filename, content, content_type)
-    
+
     async def download_file(self, key: str) -> bytes:
         """Download de arquivo."""
-        response = await run_in_threadpool(self.client.get_object, Bucket=self.bucket, Key=key)
-        return await run_in_threadpool(response["Body"].read)
-    
+        with storage_timer("download"):
+            response = await run_in_threadpool(self.client.get_object, Bucket=self.bucket, Key=key)
+            return await run_in_threadpool(response["Body"].read)
+
     async def delete_file(self, key: str) -> bool:
         """Deletar arquivo."""
-        try:
-            await run_in_threadpool(self.client.delete_object, Bucket=self.bucket, Key=key)
-            return True
-        except ClientError:
-            return False
-    
+        with storage_timer("delete") as timer:
+            try:
+                await run_in_threadpool(self.client.delete_object, Bucket=self.bucket, Key=key)
+                return True
+            except ClientError:
+                timer.result = "error"
+                return False
+
     async def file_exists(self, key: str) -> bool:
         """Verifica se arquivo existe."""
         try:
@@ -176,26 +177,27 @@ class StorageService:
             return True
         except ClientError:
             return False
-    
+
     async def get_presigned_url(
         self,
         key: str,
         expires_in: int = 3600,
         download_filename: str | None = None,
     ) -> str:
-        """Gera URL pré-assinada com opção de download."""
-        params = {"Bucket": self.bucket, "Key": key}
-        
-        if download_filename:
-            params["ResponseContentDisposition"] = f'attachment; filename="{download_filename}"'
-        
-        return await run_in_threadpool(
-            self.client.generate_presigned_url,
-            "get_object",
-            Params=params,
-            ExpiresIn=expires_in,
-        )
-    
+        """Gera URL pre-assinada com opcao de download."""
+        with storage_timer("presign"):
+            params = {"Bucket": self.bucket, "Key": key}
+
+            if download_filename:
+                params["ResponseContentDisposition"] = f'attachment; filename="{download_filename}"'
+
+            return await run_in_threadpool(
+                self.client.generate_presigned_url,
+                "get_object",
+                Params=params,
+                ExpiresIn=expires_in,
+            )
+
     async def get_presigned_upload_url(
         self,
         tenant_id: UUID,
@@ -205,41 +207,40 @@ class StorageService:
         expires_in: int = 3600,
     ) -> dict:
         """
-        Gera URL pré-assinada para upload direto do cliente.
-        
-        Útil para uploads grandes sem passar pelo backend.
+        Gera URL pre-assinada para upload direto do cliente.
+
+        Util para uploads grandes sem passar pelo backend.
         """
-        filename = self._validate_declared_type(filename, content_type)
-        key = self._generate_key(tenant_id, folder, filename)
-        url = await run_in_threadpool(
-            self.client.generate_presigned_url,
-            "put_object",
-            Params={
-                "Bucket": self.bucket,
-                "Key": key,
-                "ContentType": content_type,
-            },
-            ExpiresIn=expires_in,
-        )
-        
-        return {
-            "upload_url": url,
-            "key": key,
-            "expires_in": expires_in,
-        }
+        with storage_timer("presign"):
+            filename = self._validate_declared_type(filename, content_type)
+            key = self._generate_key(tenant_id, folder, filename)
+            url = await run_in_threadpool(
+                self.client.generate_presigned_url,
+                "put_object",
+                Params={
+                    "Bucket": self.bucket,
+                    "Key": key,
+                    "ContentType": content_type,
+                },
+                ExpiresIn=expires_in,
+            )
+
+            return {
+                "upload_url": url,
+                "key": key,
+                "expires_in": expires_in,
+            }
 
 
-# Singleton
 _storage_service: StorageService | None = None
 
 
 def get_storage_service() -> StorageService:
-    """Obtém instância singleton do serviço de storage."""
+    """Obtem instancia singleton do servico de storage."""
     global _storage_service
     if _storage_service is None:
         _storage_service = StorageService()
     return _storage_service
 
 
-# Também exporta como variável direta para conveniência
 # Initialization is lazy: importing API/tasks must not contact object storage.
