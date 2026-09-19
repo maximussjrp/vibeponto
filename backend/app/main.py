@@ -2,8 +2,9 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api.routes import (
     auth_router,
@@ -19,7 +20,8 @@ from app.api.routes import (
     usuarios_router,
 )
 from app.core.config import settings
-from app.core.database import init_db
+from app.core.database import engine, init_db
+from app.core.redis import get_redis
 
 
 @asynccontextmanager
@@ -81,8 +83,36 @@ app.include_router(tenant_router, prefix="/api/v1")
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "version": "0.1.0"}
+    """Liveness check endpoint."""
+    return {"status": "ok", "version": settings.app_version}
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness check endpoint for production dependency checks."""
+    checks = {}
+
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        checks["database"] = "error"
+
+    try:
+        redis = await get_redis()
+        await redis.client.ping()
+        checks["redis"] = "ok"
+    except Exception:
+        checks["redis"] = "error"
+
+    if all(status == "ok" for status in checks.values()):
+        return {"status": "ready", "version": settings.app_version, "checks": checks}
+
+    raise HTTPException(
+        status_code=503,
+        detail={"status": "unready", "version": settings.app_version, "checks": checks},
+    )
 
 
 @app.get("/")

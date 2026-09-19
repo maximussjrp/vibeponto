@@ -49,6 +49,7 @@ jobs:
       SECRET_KEY: ci-secret-key-with-enough-entropy-0123456789abcdef
       MFA_ENCRYPTION_KEY: ci-mfa-encryption-key-0123456789abcdef
       ENVIRONMENT: development
+      DEBUG: 'false'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
