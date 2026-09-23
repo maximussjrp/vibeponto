@@ -45,7 +45,7 @@ services:
   # MINIO (S3-Compatible Storage)
   # ============================================================================
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
     container_name: vibeponto-minio
     command: server /data --console-address ":9001"
     environment:
@@ -57,7 +57,7 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 30s
       timeout: 20s
       retries: 3

@@ -69,3 +69,4 @@ node_modules/
 .next/
 *.tsbuildinfo
 .ruff_cache/
+backend/celerybeat-schedule

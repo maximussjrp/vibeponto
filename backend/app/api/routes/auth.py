@@ -52,6 +52,27 @@ from app.services.mfa import generate_backup_codes, replace_backup_codes, verify
 router = APIRouter(prefix="/auth", tags=["Autenticação"], dependencies=[Depends(auth_rate_limit)])
 
 
+def usuario_to_read(usuario: Usuario) -> UsuarioRead:
+    """Build a response schema from already-loaded user attributes."""
+    return UsuarioRead.model_validate({
+        "id": usuario.id,
+        "tenant_id": usuario.tenant_id,
+        "nome": usuario.nome,
+        "email": usuario.email,
+        "cpf": usuario.cpf,
+        "telefone": usuario.telefone,
+        "matricula": usuario.matricula,
+        "papel": usuario.papel,
+        "status": usuario.status,
+        "mfa_enabled": usuario.mfa_enabled,
+        "foto_base_url": usuario.foto_base_url,
+        "equipe_id": usuario.equipe_id,
+        "ultimo_login": usuario.ultimo_login,
+        "created_at": usuario.created_at,
+        "updated_at": usuario.updated_at,
+    })
+
+
 def generate_slug(nome: str) -> str:
     """Gerar slug a partir do nome da empresa."""
     import re
@@ -264,7 +285,7 @@ async def login(
     if mfa_enabled:
         if not request.mfa_code:
             # Retorna flag para frontend solicitar código
-            user_data = UsuarioRead.model_validate(usuario)
+            user_data = usuario_to_read(usuario)
             return LoginResponse(
                 access_token="",
                 refresh_token="",
@@ -287,17 +308,11 @@ async def login(
     if web:
         set_refresh_cookie(response, refresh_token_str, expires)
 
-    # Atualizar último login
-    await db.execute(
-        update(Usuario)
-        .where(Usuario.id == user_id)
-        .values(ultimo_login=datetime.utcnow())
-    )
+    # Atualizar último login no próprio objeto sem expirar atributos necessários à resposta
+    usuario.ultimo_login = datetime.utcnow()
+    user_data = usuario_to_read(usuario)
     await db.commit()
     record_auth_attempt("success")
-
-    # Construir resposta do usuário com dados do row
-    user_data = UsuarioRead.model_validate(usuario)
 
     return LoginResponse(
         access_token=access_token,
