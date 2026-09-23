@@ -44,8 +44,9 @@ interface MarcacaoHoje {
   id: string;
   tipo: string;
   evento: string;
-  timestamp_local: string;
-  timestamp_servidor: string;
+  timestamp_local?: string;
+  timestamp_servidor?: string;
+  data_hora?: string;
   status: string;
 }
 
@@ -78,6 +79,15 @@ function normalizeEvento(evento: string): EventoPonto | null {
   return EVENTO_SEQUENCE.includes(normalized as EventoPonto)
     ? (normalized as EventoPonto)
     : null;
+}
+
+function formatMarcacaoTime(marcacao: MarcacaoHoje): string {
+  const timestamp =
+    marcacao.timestamp_local || marcacao.timestamp_servidor || marcacao.data_hora;
+  if (!timestamp) return "--:--";
+
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? "--:--" : format(date, "HH:mm");
 }
 
 export default function RegistrarPontoPage() {
@@ -640,7 +650,7 @@ export default function RegistrarPontoPage() {
                     </div>
                     <span className="text-sm font-medium">{info.label}</span>
                     <span className="text-lg font-bold">
-                      {format(new Date(marcacao.timestamp_local || marcacao.timestamp_servidor), "HH:mm")}
+                      {formatMarcacaoTime(marcacao)}
                     </span>
                     <Badge
                       variant={marcacao.status === "aprovado" ? "default" : "secondary"}
