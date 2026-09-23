@@ -1,5 +1,8 @@
 """Router de marcações de ponto."""
 
+import base64
+import binascii
+import logging
 from datetime import datetime, timedelta
 from typing import Annotated, Optional
 from uuid import UUID
@@ -22,8 +25,8 @@ from app.models import (
     AuditoriaDecisao,
     MarcacaoPonto,
     MarcacaoStatus,
-    Usuario,
     UserRole,
+    Usuario,
 )
 from app.schemas import (
     AuditoriaRead,
@@ -46,8 +49,36 @@ from app.services.timekeeping import (
     create_offline_marcacao_idempotent,
 )
 
-
 router = APIRouter(prefix="/ponto", tags=["Ponto"])
+logger = logging.getLogger(__name__)
+
+
+def _end_date_boundary(value: datetime) -> tuple[datetime, bool]:
+    """Treat a date-only end value as the whole day.
+
+    FastAPI parses ``YYYY-MM-DD`` as midnight. In that case the upper bound is
+    the following midnight and must be compared exclusively. Full timestamps
+    keep their exact inclusive semantics.
+    """
+    is_date_only = (
+        value.hour == 0
+        and value.minute == 0
+        and value.second == 0
+        and value.microsecond == 0
+    )
+    if is_date_only:
+        return value + timedelta(days=1), True
+    return value, False
+
+
+def _require_web_photo(value: str | None) -> str:
+    """Reject web clock-ins without the required facial evidence."""
+    if not value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A foto para validação facial é obrigatória",
+        )
+    return value
 
 
 @router.post("/marcacoes", response_model=MarcacaoRead, status_code=status.HTTP_201_CREATED)
@@ -168,8 +199,13 @@ async def listar_marcacoes(
         count_query = count_query.where(MarcacaoPonto.timestamp_servidor >= data_inicio)
     
     if data_fim:
-        query = query.where(MarcacaoPonto.timestamp_servidor <= data_fim)
-        count_query = count_query.where(MarcacaoPonto.timestamp_servidor <= data_fim)
+        end_boundary, exclusive = _end_date_boundary(data_fim)
+        if exclusive:
+            query = query.where(MarcacaoPonto.timestamp_servidor < end_boundary)
+            count_query = count_query.where(MarcacaoPonto.timestamp_servidor < end_boundary)
+        else:
+            query = query.where(MarcacaoPonto.timestamp_servidor <= end_boundary)
+            count_query = count_query.where(MarcacaoPonto.timestamp_servidor <= end_boundary)
     
     if status_filter:
         query = query.where(MarcacaoPonto.status == status_filter)
@@ -594,7 +630,7 @@ async def revisar_auditoria(
 class RegistroPontoWeb(BaseSchema):
     """Schema para registro de ponto via web."""
     
-    evento: str  # entrada, inicio_intervalo, fim_intervalo, saida
+    evento: str  # entrada, pausa_inicio, pausa_fim, saida
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     precisao_gps: Optional[float] = None
@@ -634,16 +670,18 @@ async def registrar_ponto_web(
     - Armazenamento de foto no MinIO/S3
     """
     import hashlib
-    import base64
+
     from app.models import MarcacaoEvento, MarcacaoTipo
-    from app.services.geo import geo_service, GeoPoint
-    from app.services.storage import StorageService
     from app.services.facial_recognition import facial_service
+    from app.services.geo import GeoPoint, geo_service
+    from app.services.storage import StorageService
     
     # Mapear evento
     evento_map = {
         "entrada": MarcacaoEvento.ENTRADA,
+        "pausa_inicio": MarcacaoEvento.PAUSA_INICIO,
         "inicio_intervalo": MarcacaoEvento.PAUSA_INICIO,
+        "pausa_fim": MarcacaoEvento.PAUSA_FIM,
         "fim_intervalo": MarcacaoEvento.PAUSA_FIM,
         "saida": MarcacaoEvento.SAIDA,
     }
@@ -654,6 +692,8 @@ async def registrar_ponto_web(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Evento inválido: {data.evento}",
         )
+
+    foto_base64 = _require_web_photo(data.foto_base64)
     
     # Verificar se já existe marcação do mesmo tipo hoje
     hoje_inicio = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -707,13 +747,15 @@ async def registrar_ponto_web(
     face_valida = True
     face_confianca = 0.0
     
-    if data.foto_base64:
+    if foto_base64:
         try:
             # Decodificar base64
-            if "," in data.foto_base64:
-                foto_bytes = base64.b64decode(data.foto_base64.split(",", 1)[1])
+            if "," in foto_base64:
+                foto_bytes = base64.b64decode(
+                    foto_base64.split(",", 1)[1], validate=True
+                )
             else:
-                foto_bytes = base64.b64decode(data.foto_base64)
+                foto_bytes = base64.b64decode(foto_base64, validate=True)
             
             # Validar reconhecimento facial
             detection_result = await facial_service.detect_face(foto_bytes)
@@ -767,10 +809,17 @@ async def registrar_ponto_web(
                 
         except HTTPException:
             raise
-        except Exception as e:
-            # Logar erro mas não falhar o registro
-            import logging
-            logging.error(f"Erro ao processar foto: {e}")
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Foto inválida. Capture uma nova foto e tente novamente",
+            ) from exc
+        except Exception as exc:
+            logger.exception("Erro ao processar foto do registro de ponto")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Não foi possível validar e armazenar a foto. Tente novamente",
+            ) from exc
     
     # ===== 3. CRIAR MARCAÇÃO =====
     agora = datetime.utcnow()
@@ -790,6 +839,7 @@ async def registrar_ponto_web(
         modo="online",
         status=MarcacaoStatus.PENDENTE,
         suspeita=suspeita,
+        foto_url=foto_url,
         evidencias={
             "origem": "web",
             "dispositivo": data.dispositivo,
@@ -840,7 +890,6 @@ async def validar_face(
     - aws: Amazon Rekognition
     - azure: Azure Face API
     """
-    import base64
     from app.services.facial_recognition import facial_service
     
     try:

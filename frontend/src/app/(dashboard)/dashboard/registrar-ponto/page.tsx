@@ -36,12 +36,16 @@ import {
   Moon,
 } from "lucide-react";
 import api from "@/lib/api";
+import { useAuthStore } from "@/store/auth";
+
+type EventoPonto = "entrada" | "pausa_inicio" | "pausa_fim" | "saida";
 
 interface MarcacaoHoje {
   id: string;
   tipo: string;
   evento: string;
-  data_hora: string;
+  timestamp_local: string;
+  timestamp_servidor: string;
   status: string;
 }
 
@@ -58,15 +62,27 @@ interface FaceValidationResult {
   message: string;
 }
 
-const EVENTO_INFO: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+const EVENTO_INFO: Record<EventoPonto, { label: string; icon: React.ReactNode; color: string }> = {
   entrada: { label: "Entrada", icon: <Sun className="h-5 w-5" />, color: "bg-green-500" },
-  inicio_intervalo: { label: "Início Intervalo", icon: <Coffee className="h-5 w-5" />, color: "bg-yellow-500" },
-  fim_intervalo: { label: "Fim Intervalo", icon: <Utensils className="h-5 w-5" />, color: "bg-orange-500" },
+  pausa_inicio: { label: "Início Intervalo", icon: <Coffee className="h-5 w-5" />, color: "bg-yellow-500" },
+  pausa_fim: { label: "Fim Intervalo", icon: <Utensils className="h-5 w-5" />, color: "bg-orange-500" },
   saida: { label: "Saída", icon: <Moon className="h-5 w-5" />, color: "bg-blue-500" },
 };
 
+const EVENTO_SEQUENCE = Object.keys(EVENTO_INFO) as EventoPonto[];
+
+function normalizeEvento(evento: string): EventoPonto | null {
+  const normalized = evento.toLowerCase();
+  if (normalized === "inicio_intervalo") return "pausa_inicio";
+  if (normalized === "fim_intervalo") return "pausa_fim";
+  return EVENTO_SEQUENCE.includes(normalized as EventoPonto)
+    ? (normalized as EventoPonto)
+    : null;
+}
+
 export default function RegistrarPontoPage() {
   const queryClient = useQueryClient();
+  const user = useAuthStore((state) => state.user);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -84,7 +100,9 @@ export default function RegistrarPontoPage() {
   const [validatingFace, setValidatingFace] = useState(false);
   
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
-  const [selectedEvento, setSelectedEvento] = useState<string | null>(null);
+  const [selectedEvento, setSelectedEvento] = useState<EventoPonto | null>(null);
+
+  const marcacoesQueryKey = ["marcacoes-hoje-registrar", user?.id] as const;
 
   // Relógio em tempo real
   useEffect(() => {
@@ -96,30 +114,34 @@ export default function RegistrarPontoPage() {
 
   // Buscar marcações de hoje
   const { data: marcacoesHojeRaw, isLoading: loadingMarcacoes } = useQuery({
-    queryKey: ["marcacoes-hoje-registrar"],
+    queryKey: marcacoesQueryKey,
     queryFn: async () => {
+      if (!user) return [];
       const hoje = format(new Date(), "yyyy-MM-dd");
-      const response = await api.get(`/ponto/marcacoes?data_inicio=${hoje}&data_fim=${hoje}`);
+      const params = new URLSearchParams({
+        data_inicio: hoje,
+        data_fim: hoje,
+        usuario_id: user.id,
+      });
+      const response = await api.get(`/ponto/marcacoes?${params.toString()}`);
       // API pode retornar { items: [] } ou [] diretamente
       const data = response.data;
       return Array.isArray(data) ? data : (data?.items || []) as MarcacaoHoje[];
     },
+    enabled: Boolean(user?.id),
   });
   
   // Garantir que marcacoesHoje é sempre um array
   const marcacoesHoje: MarcacaoHoje[] = Array.isArray(marcacoesHojeRaw) ? marcacoesHojeRaw : [];
 
   // Determinar próximo evento
-  const getProximoEvento = (): string => {
-    if (marcacoesHoje.length === 0) return "entrada";
-    
-    const eventos = marcacoesHoje.map(m => m.evento);
-    if (!eventos.includes("entrada")) return "entrada";
-    if (!eventos.includes("inicio_intervalo")) return "inicio_intervalo";
-    if (!eventos.includes("fim_intervalo")) return "fim_intervalo";
-    if (!eventos.includes("saida")) return "saida";
-    
-    return "entrada"; // Próximo dia
+  const getProximoEvento = (): EventoPonto | null => {
+    const eventos = new Set(
+      marcacoesHoje
+        .map((marcacao) => normalizeEvento(marcacao.evento))
+        .filter((evento): evento is EventoPonto => evento !== null)
+    );
+    return EVENTO_SEQUENCE.find((evento) => !eventos.has(evento)) || null;
   };
 
   // Obter localização
@@ -296,7 +318,7 @@ export default function RegistrarPontoPage() {
 
   // Mutation para registrar ponto
   const registrarPontoMutation = useMutation({
-    mutationFn: async (evento: string) => {
+    mutationFn: async (evento: EventoPonto) => {
       const payload = {
         evento,
         latitude: location?.latitude,
@@ -310,9 +332,13 @@ export default function RegistrarPontoPage() {
       const response = await api.post("/ponto/registrar", payload);
       return response.data;
     },
-    onSuccess: () => {
+    onSuccess: (novaMarcacao: MarcacaoHoje) => {
       toast.success("Ponto registrado com sucesso!");
-      queryClient.invalidateQueries({ queryKey: ["marcacoes-hoje-registrar"] });
+      queryClient.setQueryData<MarcacaoHoje[]>(marcacoesQueryKey, (atuais = []) => [
+        novaMarcacao,
+        ...atuais.filter((marcacao) => marcacao.id !== novaMarcacao.id),
+      ]);
+      queryClient.invalidateQueries({ queryKey: marcacoesQueryKey });
       setCapturedPhoto(null);
       setFaceValidation(null);
       setConfirmDialogOpen(false);
@@ -324,7 +350,7 @@ export default function RegistrarPontoPage() {
   });
 
   // Iniciar processo de registro
-  const iniciarRegistro = (evento: string) => {
+  const iniciarRegistro = (evento: EventoPonto) => {
     setSelectedEvento(evento);
     
     // Verificar requisitos
@@ -600,7 +626,10 @@ export default function RegistrarPontoPage() {
           ) : marcacoesHoje.length > 0 ? (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               {marcacoesHoje.map((marcacao) => {
-                const info = EVENTO_INFO[marcacao.evento] || { label: marcacao.evento, color: "bg-gray-500" };
+                const evento = normalizeEvento(marcacao.evento);
+                const info = evento
+                  ? EVENTO_INFO[evento]
+                  : { label: marcacao.evento, color: "bg-gray-500", icon: <Clock className="h-5 w-5" /> };
                 return (
                   <div
                     key={marcacao.id}
@@ -611,7 +640,7 @@ export default function RegistrarPontoPage() {
                     </div>
                     <span className="text-sm font-medium">{info.label}</span>
                     <span className="text-lg font-bold">
-                      {format(new Date(marcacao.data_hora), "HH:mm")}
+                      {format(new Date(marcacao.timestamp_local || marcacao.timestamp_servidor), "HH:mm")}
                     </span>
                     <Badge
                       variant={marcacao.status === "aprovado" ? "default" : "secondary"}
@@ -637,13 +666,17 @@ export default function RegistrarPontoPage() {
         <CardHeader>
           <CardTitle>Registrar Ponto</CardTitle>
           <CardDescription>
-            Próximo registro sugerido: <strong>{EVENTO_INFO[proximoEvento]?.label || proximoEvento}</strong>
+            {proximoEvento ? (
+              <>Próximo registro sugerido: <strong>{EVENTO_INFO[proximoEvento].label}</strong></>
+            ) : (
+              <strong>Jornada de hoje concluída</strong>
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {Object.entries(EVENTO_INFO).map(([evento, info]) => {
-              const jaRegistrado = marcacoesHoje.some((m) => m.evento === evento);
+            {(Object.entries(EVENTO_INFO) as [EventoPonto, (typeof EVENTO_INFO)[EventoPonto]][]).map(([evento, info]) => {
+              const jaRegistrado = marcacoesHoje.some((m) => normalizeEvento(m.evento) === evento);
               const isSugerido = evento === proximoEvento;
 
               return (
@@ -675,14 +708,14 @@ export default function RegistrarPontoPage() {
           </div>
 
           {/* Avisos */}
-          {(!location || !faceValidation?.isValid) && (
+          {proximoEvento && (!location || !faceValidation?.isValid) && (
             <div className="mt-4 p-4 bg-yellow-500/10 text-yellow-700 rounded-lg flex items-start gap-2">
               <AlertTriangle className="h-5 w-5 mt-0.5" />
               <div>
-                <p className="font-medium">Requisitos pendentes:</p>
+                <p className="font-medium">Para o próximo registro:</p>
                 <ul className="text-sm mt-1 space-y-1">
                   {!location && <li>• Aguardando localização</li>}
-                  {!faceValidation?.isValid && <li>• Tire uma foto para validação facial</li>}
+                  {!faceValidation?.isValid && <li>• Capture uma nova foto para validação facial</li>}
                 </ul>
               </div>
             </div>
@@ -695,7 +728,8 @@ export default function RegistrarPontoPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Confirmar Registro de Ponto</AlertDialogTitle>
-            <AlertDialogDescription>
+            <AlertDialogDescription asChild>
+              <div>
               Você está prestes a registrar:
               <div className="mt-4 p-4 bg-muted rounded-lg space-y-2">
                 <div className="flex justify-between">
@@ -710,6 +744,7 @@ export default function RegistrarPontoPage() {
                   <span>Data:</span>
                   <strong>{format(new Date(), "dd/MM/yyyy")}</strong>
                 </div>
+              </div>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
