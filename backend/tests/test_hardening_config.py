@@ -26,6 +26,13 @@ def test_legacy_jwt_secret_environment(monkeypatch):
     assert Settings(_env_file=None).secret_key == secret
 
 
+def test_development_cors_origins_cover_local_frontends():
+    settings = Settings(_env_file=None)
+
+    assert "http://localhost:3000" in settings.cors_origins
+    assert "http://localhost:3001" in settings.cors_origins
+
+
 def test_worker_configuration(monkeypatch):
     from app.core.config import settings
 
