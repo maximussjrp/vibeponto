@@ -9,7 +9,7 @@ import toast from "react-hot-toast";
 import { getErrorMessage } from "@/lib/api";
 import { pontoService, usuariosService } from "@/services";
 import type { Marcacao, MarcacaoCreate, Correcao, CorrecaoCreate, CorrecaoStatus } from "@/services/ponto";
-import { formatDate, formatTime, getInitials } from "@/lib/utils";
+import { formatCoordinates, formatDate, formatTime, getInitials } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -260,8 +260,11 @@ export default function PontoPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {marcacoesData.items.map((marcacao) => (
-              <TableRow key={marcacao.id}>
+            {marcacoesData.items.map((marcacao) => {
+              const coordinates = formatCoordinates(marcacao.latitude, marcacao.longitude);
+
+              return (
+                <TableRow key={marcacao.id}>
                 <TableCell>
                   <div className="flex items-center gap-3">
                     <Avatar className="h-8 w-8">
@@ -283,10 +286,10 @@ export default function PontoPage() {
                   </div>
                 </TableCell>
                 <TableCell>
-                  {marcacao.latitude && marcacao.longitude ? (
+                  {coordinates ? (
                     <div className="flex items-center gap-1 text-sm text-muted-foreground">
                       <MapPin className="h-3 w-3" />
-                      {marcacao.endereco || `${marcacao.latitude.toFixed(4)}, ${marcacao.longitude.toFixed(4)}`}
+                      {marcacao.endereco || coordinates}
                     </div>
                   ) : (
                     <span className="text-muted-foreground">-</span>
@@ -313,8 +316,9 @@ export default function PontoPage() {
                     <Badge variant="secondary">Pendente</Badge>
                   )}
                 </TableCell>
-              </TableRow>
-            ))}
+                </TableRow>
+              );
+            })}
           </TableBody>
         </Table>
       </Card>

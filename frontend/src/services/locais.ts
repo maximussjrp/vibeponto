@@ -3,6 +3,7 @@
  */
 
 import api from "@/lib/api";
+import { toFiniteNumber } from "@/lib/utils";
 import { PaginatedResponse } from "./usuarios";
 
 // Tipos
@@ -77,7 +78,10 @@ export interface ValidacaoGeo {
 function normalizePerimetro(perimetro: Perimetro): Perimetro {
   return {
     ...perimetro,
-    raio_metros: perimetro.raio_metros ?? perimetro.raio ?? 100,
+    latitude: toFiniteNumber(perimetro.latitude) ?? Number.NaN,
+    longitude: toFiniteNumber(perimetro.longitude) ?? Number.NaN,
+    raio_metros: toFiniteNumber(perimetro.raio_metros ?? perimetro.raio) ?? 100,
+    tolerancia_metros: toFiniteNumber(perimetro.tolerancia_metros) ?? 0,
   };
 }
 

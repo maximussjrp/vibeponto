@@ -3,6 +3,7 @@
  */
 
 import api from "@/lib/api";
+import { toFiniteNumber } from "@/lib/utils";
 import { PaginatedResponse } from "./usuarios";
 
 // Tipos
@@ -127,6 +128,8 @@ function normalizeMarcacao(marcacao: Marcacao): Marcacao {
   return {
     ...marcacao,
     data_hora: marcacao.data_hora || marcacao.timestamp_local || marcacao.timestamp || marcacao.created_at,
+    latitude: toFiniteNumber(marcacao.latitude),
+    longitude: toFiniteNumber(marcacao.longitude),
     dispositivo: marcacao.dispositivo || marcacao.device_info || marcacao.device_id || "Web",
     usuario: marcacao.usuario
       ? {

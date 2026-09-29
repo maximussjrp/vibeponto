@@ -7,6 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import toast from "react-hot-toast";
 import { getErrorMessage } from "@/lib/api";
+import { formatCoordinates } from "@/lib/utils";
 import { locaisService } from "@/services";
 import type { Perimetro, PerimetroCreate, PerimetroUpdate } from "@/services/locais";
 import { Button } from "@/components/ui/button";
@@ -351,7 +352,7 @@ export default function LocaisPage() {
                       </TableCell>
                       <TableCell className="max-w-xs truncate">{local.endereco || "-"}</TableCell>
                       <TableCell className="text-sm text-muted-foreground">
-                        {local.latitude.toFixed(4)}, {local.longitude.toFixed(4)}
+                        {formatCoordinates(local.latitude, local.longitude) || "-"}
                       </TableCell>
                       <TableCell>{local.raio_metros}m</TableCell>
                       <TableCell>

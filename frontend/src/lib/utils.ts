@@ -37,6 +37,27 @@ export function formatCurrency(value: number): string {
   }).format(value);
 }
 
+export function toFiniteNumber(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "number" && typeof value !== "string") return undefined;
+  if (typeof value === "string" && value.trim() === "") return undefined;
+
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function formatCoordinates(
+  latitude: unknown,
+  longitude: unknown,
+  fractionDigits = 4
+): string | null {
+  const parsedLatitude = toFiniteNumber(latitude);
+  const parsedLongitude = toFiniteNumber(longitude);
+
+  if (parsedLatitude === undefined || parsedLongitude === undefined) return null;
+  return `${parsedLatitude.toFixed(fractionDigits)}, ${parsedLongitude.toFixed(fractionDigits)}`;
+}
+
 export function formatHours(minutes: number): string {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
