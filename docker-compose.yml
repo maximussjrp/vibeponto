@@ -45,7 +45,7 @@ services:
   # MINIO (S3-Compatible Storage)
   # ============================================================================
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
+    image: elestio/minio:latest
     container_name: vibeponto-minio
     command: server /data --console-address ":9001"
     environment:
