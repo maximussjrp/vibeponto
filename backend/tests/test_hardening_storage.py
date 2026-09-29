@@ -44,6 +44,38 @@ def storage(monkeypatch):
     return service
 
 
+async def test_presigned_urls_use_public_storage_endpoint(monkeypatch):
+    clients = {}
+
+    class EndpointAwareS3(DummyS3):
+        def __init__(self, endpoint_url):
+            super().__init__()
+            self.endpoint_url = endpoint_url
+
+        def generate_presigned_url(self, operation, **kwargs):
+            key = kwargs["Params"]["Key"]
+            return f"{self.endpoint_url}/{key}"
+
+    def create_client(*args, **kwargs):
+        client = EndpointAwareS3(kwargs["endpoint_url"])
+        clients[kwargs["endpoint_url"]] = client
+        return client
+
+    monkeypatch.setattr("app.services.storage.settings.storage_endpoint", "http://minio:9000")
+    monkeypatch.setattr(
+        "app.services.storage.settings.storage_public_endpoint",
+        "https://storage.vibeponto.com.br",
+    )
+    monkeypatch.setattr("app.services.storage.boto3.client", create_client)
+
+    service = StorageService()
+    url = await service.get_presigned_url("tenant/documentos/contrato.pdf")
+
+    assert service.client is clients["http://minio:9000"]
+    assert service.public_client is clients["https://storage.vibeponto.com.br"]
+    assert url == "https://storage.vibeponto.com.br/tenant/documentos/contrato.pdf"
+
+
 @pytest.fixture
 async def session_factory():
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)

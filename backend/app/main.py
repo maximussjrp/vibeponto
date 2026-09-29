@@ -23,6 +23,7 @@ from app.api.routes import (
 )
 from app.core.config import settings
 from app.core.database import engine, init_db
+from app.core.email import configure_email_service
 from app.core.observability import (
     HTTP_REQUESTS_IN_PROGRESS,
     REQUEST_ID_HEADER,
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager para a aplicacao."""
+    configure_email_service()
     await init_db()
     yield
 

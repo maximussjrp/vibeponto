@@ -1,5 +1,6 @@
 """Router de autenticação."""
 
+import logging
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -50,6 +51,7 @@ from app.schemas import (
 from app.services.mfa import generate_backup_codes, replace_backup_codes, verify_mfa_code
 
 router = APIRouter(prefix="/auth", tags=["Autenticação"], dependencies=[Depends(auth_rate_limit)])
+logger = logging.getLogger(__name__)
 
 
 def usuario_to_read(usuario: Usuario) -> UsuarioRead:
@@ -460,11 +462,22 @@ async def request_password_reset(
         )
 
         # Enviar email
-        await email_service.send_password_reset(
-            email=usuario.email,
-            token=token,
-            nome=usuario.nome,
-        )
+        try:
+            sent = await email_service.send_password_reset(
+                email=usuario.email,
+                token=token,
+                nome=usuario.nome,
+            )
+            if not sent:
+                logger.error(
+                    "Password reset email delivery failed",
+                    extra={"user_id": str(usuario.id)},
+                )
+        except Exception:
+            logger.exception(
+                "Password reset email provider unavailable",
+                extra={"user_id": str(usuario.id)},
+            )
 
     return SuccessResponse(
         message="Se o email existir no sistema, um link de recuperação será enviado"

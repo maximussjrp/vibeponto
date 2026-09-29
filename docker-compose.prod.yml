@@ -1,7 +1,11 @@
+x-logging: &default-logging
+  driver: local
+
 services:
   postgres:
     image: postgis/postgis:15-3.4
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
@@ -20,6 +24,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
@@ -36,6 +41,7 @@ services:
   minio:
     image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
     restart: unless-stopped
+    logging: *default-logging
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
@@ -53,6 +59,7 @@ services:
   rabbitmq:
     image: rabbitmq:3-management-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?set RABBITMQ_DEFAULT_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?set RABBITMQ_DEFAULT_PASS}
@@ -72,15 +79,28 @@ services:
       dockerfile: Dockerfile
       target: production
     restart: "no"
+    logging: *default-logging
     environment: &backend-env
       ENVIRONMENT: production
       DEBUG: "false"
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:?set APP_PUBLIC_URL}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-disabled}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY}
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS}
       STORAGE_ENDPOINT: http://minio:9000
+      STORAGE_PUBLIC_ENDPOINT: ${STORAGE_PUBLIC_ENDPOINT:?set STORAGE_PUBLIC_ENDPOINT}
       STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER}
       STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       STORAGE_BUCKET: ${STORAGE_BUCKET:?set STORAGE_BUCKET}
@@ -109,6 +129,7 @@ services:
       dockerfile: Dockerfile
       target: production
     restart: unless-stopped
+    logging: *default-logging
     environment: *backend-env
     depends_on:
       migrate:
@@ -131,13 +152,36 @@ services:
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?set NEXT_PUBLIC_API_URL}
     restart: unless-stopped
+    logging: *default-logging
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?set NEXT_PUBLIC_API_URL}
     depends_on:
       - api
+    expose:
+      - "3000"
+    networks:
+      - vibeponto-network
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:?set SITE_DOMAIN}
+      STORAGE_DOMAIN: ${STORAGE_DOMAIN:?set STORAGE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - frontend
+      - minio
     networks:
       - vibeponto-network
 
@@ -147,6 +191,7 @@ services:
       dockerfile: Dockerfile
       target: production
     restart: unless-stopped
+    logging: *default-logging
     environment: *backend-env
     depends_on:
       migrate:
@@ -155,7 +200,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["celery", "-A", "app.worker", "worker", "--loglevel=info"]
+    command: ["celery", "-A", "app.worker", "worker", "--loglevel=info", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
     networks:
       - vibeponto-network
 
@@ -165,6 +210,7 @@ services:
       dockerfile: Dockerfile
       target: production
     restart: unless-stopped
+    logging: *default-logging
     environment: *backend-env
     depends_on:
       celery-worker:
@@ -178,6 +224,8 @@ volumes:
   redis_data:
   minio_data:
   rabbitmq_data:
+  caddy_data:
+  caddy_config:
 
 networks:
   vibeponto-network:

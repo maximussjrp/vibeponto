@@ -1,536 +1,279 @@
-# 🚀 Guia de Deploy - VibePonto
+# Deploy do VibePonto na Hetzner
 
-Este guia cobre o deploy do VibePonto em ambiente de produção.
+Este roteiro publica o sistema em `https://vibeponto.com.br`, mantém banco, Redis,
+RabbitMQ e painel do MinIO fora da internet e usa Caddy para emitir e renovar o
+certificado HTTPS automaticamente.
 
----
+## 1. Criar o servidor
 
-## 📋 Checklist Pré-Deploy
+Antes de clicar em **Create & Buy now**:
 
-### Segurança
-- [ ] Alterar `SECRET_KEY` para valor único e forte (32+ caracteres)
-- [ ] Alterar senhas do banco de dados
-- [ ] Configurar HTTPS/SSL
-- [ ] Configurar CORS para domínio de produção
-- [ ] Habilitar rate limiting
-- [ ] Remover `DEBUG=True`
+1. Use **Ubuntu 24.04 LTS**.
+2. Para a pilha completa, escolha uma máquina com **8 GB de RAM**. Uma máquina de
+   4 GB serve apenas para piloto com pouco tráfego e `API_WORKERS=1`.
+3. Escolha a localização considerando latência e onde os dados podem ser
+   armazenados. Ashburn tende a ter menor latência para o Brasil; as localizações
+   europeias mantêm os dados do servidor na União Europeia.
+4. Mantenha IPv4. IPv6 é opcional.
+5. Adicione uma chave SSH. No PowerShell local:
 
-### Infraestrutura
-- [ ] Servidor com mínimo 2 vCPU, 4GB RAM
-- [ ] PostgreSQL 15+ com PostGIS
-- [ ] Redis 7+
-- [ ] Armazenamento S3/MinIO para arquivos
-- [ ] Domínio configurado (DNS A/CNAME)
+   ```powershell
+   ssh-keygen -t ed25519 -C "vibeponto-prod" -f "$env:USERPROFILE\.ssh\vibeponto_prod"
+   Get-Content "$env:USERPROFILE\.ssh\vibeponto_prod.pub" | Set-Clipboard
+   ```
 
----
+   Cole a chave pública em **SSH keys > Add SSH key**. Nunca envie ou copie o
+   arquivo sem a extensão `.pub`.
+6. Crie e aplique um firewall com estas regras de entrada:
 
-## 🏗️ Opções de Deploy
+   | Protocolo | Porta | Origem |
+   |---|---:|---|
+   | TCP | 22 | seu IP público `/32` |
+   | TCP | 80 | qualquer IPv4 e IPv6 |
+   | TCP | 443 | qualquer IPv4 e IPv6 |
+7. Ative **Backups**.
+8. Use o nome `vibeponto-prod-01` e crie o servidor.
 
-### Opção 1: VPS com Docker Compose (Recomendado para início)
+As portas 3000, 8000, 5432, 6379, 5672, 9000, 9001 e 15672 não devem ser
+liberadas no firewall.
 
-#### Servidores Recomendados
-- **DigitalOcean**: Droplet $24/mês (2 vCPU, 4GB)
-- **Hetzner**: CX21 €6.90/mês (2 vCPU, 4GB)
-- **Vultr**: $24/mês (2 vCPU, 4GB)
-- **Linode**: Linode 4GB $24/mês
+## 2. Primeiro acesso e usuário administrativo
 
-#### Passo a Passo
+Substitua `IP_DO_SERVIDOR` pelo IPv4 mostrado na Hetzner:
 
-```bash
-# 1. Conectar no servidor
-ssh root@seu-servidor.com
-
-# 2. Instalar Docker
-curl -fsSL https://get.docker.com | sh
-apt install -y docker-compose-plugin
-
-# 3. Clonar repositório
-git clone https://seu-repo.git /opt/vibeponto
-cd /opt/vibeponto
-
-# 4. Criar arquivo .env de produção
-cp .env.example .env
-nano .env
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\vibeponto_prod" root@IP_DO_SERVIDOR
 ```
 
-#### Configurar .env de Produção
+No servidor:
 
-```env
-# Ambiente
+```bash
+apt update
+apt upgrade -y
+apt install -y ca-certificates curl git openssl nano
+adduser --disabled-password --gecos "" deploy
+usermod -aG sudo deploy
+install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
+cp /root/.ssh/authorized_keys /home/deploy/.ssh/authorized_keys
+chown deploy:deploy /home/deploy/.ssh/authorized_keys
+chmod 600 /home/deploy/.ssh/authorized_keys
+```
+
+Abra outro PowerShell e confirme o acesso antes de desabilitar o login de root:
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\vibeponto_prod" deploy@IP_DO_SERVIDOR
+```
+
+Somente depois do teste, ainda como root:
+
+```bash
+cat >/etc/ssh/sshd_config.d/99-vibeponto.conf <<'EOF'
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+EOF
+sshd -t
+systemctl reload ssh
+```
+
+## 3. Instalar Docker pelo repositório oficial
+
+Execute como o usuário `deploy`:
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+. /etc/os-release
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker deploy
+exit
+```
+
+Conecte novamente como `deploy` e valide:
+
+```bash
+docker version
+docker compose version
+```
+
+## 4. Baixar o projeto
+
+```bash
+sudo mkdir -p /opt/vibeponto
+sudo chown deploy:deploy /opt/vibeponto
+git clone https://github.com/maximussjrp/vibeponto.git /opt/vibeponto
+cd /opt/vibeponto
+```
+
+O deploy deve usar uma revisão que já contenha `deploy/Caddyfile` e a configuração
+do serviço `caddy` em `docker-compose.prod.yml`.
+
+## 5. Configurar os segredos
+
+```bash
+cd /opt/vibeponto
+cp .env.production.example .env.production
+chmod 600 .env.production
+```
+
+Gere um valor diferente para cada senha/chave:
+
+```bash
+openssl rand -hex 32
+openssl rand -hex 32
+openssl rand -hex 32
+openssl rand -hex 32
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
+Edite o arquivo:
+
+```bash
+nano .env.production
+```
+
+Substitua todos os valores `replace-with-...`. Confirme principalmente:
+
+```dotenv
 ENVIRONMENT=production
 DEBUG=false
-
-# Banco de Dados
-POSTGRES_USER=vibeponto_prod
-POSTGRES_PASSWORD=SuaSenhaForte123!@#
-POSTGRES_DB=vibeponto_prod
-DATABASE_URL=postgresql+asyncpg://vibeponto_prod:SuaSenhaForte123!@#@postgres:5432/vibeponto_prod
-
-# Segurança
-SECRET_KEY=sua-chave-secreta-muito-forte-com-pelo-menos-32-caracteres
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REFRESH_TOKEN_EXPIRE_DAYS=7
-
-# CORS (seu domínio)
-CORS_ORIGINS=https://ponto.suaempresa.com.br
-
-# Redis
-REDIS_URL=redis://redis:6379/0
-
-# MinIO/S3
-MINIO_ROOT_USER=minio_prod
-MINIO_ROOT_PASSWORD=SuaSenhaMinio123!
-MINIO_ENDPOINT=minio:9000
-MINIO_BUCKET=vibeponto-prod
-
-# Email (opcional)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=seu-email@gmail.com
-SMTP_PASSWORD=sua-app-password
-
-# Sentry (opcional)
-SENTRY_DSN=https://xxx@sentry.io/xxx
-
-# Frontend
-NEXT_PUBLIC_API_URL=https://api.ponto.suaempresa.com.br/api/v1
+APP_PUBLIC_URL=https://vibeponto.com.br
+CORS_ORIGINS=["https://vibeponto.com.br","https://www.vibeponto.com.br"]
+NEXT_PUBLIC_API_URL=https://vibeponto.com.br/api/v1
+SITE_DOMAIN=vibeponto.com.br
+STORAGE_DOMAIN=storage.vibeponto.com.br
+STORAGE_PUBLIC_ENDPOINT=https://storage.vibeponto.com.br
+ACME_EMAIL=seu-email-operacional@exemplo.com
+API_WORKERS=2
+CELERY_WORKER_CONCURRENCY=2
 ```
 
-#### docker-compose.prod.yml
+Use somente caracteres hexadecimais nas senhas geradas acima. Isso evita que
+caracteres reservados quebrem as URLs internas do banco, Redis e RabbitMQ.
+Em uma máquina de 4 GB, use `API_WORKERS=1` e `CELERY_WORKER_CONCURRENCY=1`.
 
-```yaml
-version: '3.8'
+O exemplo mantém `EMAIL_PROVIDER=disabled`. Antes de liberar recuperação de senha
+para usuários, configure `smtp`, `sendgrid` ou `ses` e preencha as credenciais
+correspondentes no mesmo arquivo. O sistema continua respondendo de forma genérica
+quando o envio estiver indisponível, sem revelar se um e-mail está cadastrado.
 
-services:
-  api:
-    build: ./backend
-    container_name: vibeponto-api
-    restart: always
-    environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - SECRET_KEY=${SECRET_KEY}
-      - REDIS_URL=${REDIS_URL}
-    depends_on:
-      - postgres
-      - redis
-    networks:
-      - vibeponto-network
-
-  frontend:
-    build: ./frontend
-    container_name: vibeponto-frontend
-    restart: always
-    environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
-    depends_on:
-      - api
-    networks:
-      - vibeponto-network
-
-  postgres:
-    image: postgis/postgis:15-3.3
-    container_name: vibeponto-postgres
-    restart: always
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
-    networks:
-      - vibeponto-network
-
-  redis:
-    image: redis:7-alpine
-    container_name: vibeponto-redis
-    restart: always
-    volumes:
-      - redis_data:/data
-    networks:
-      - vibeponto-network
-
-  minio:
-    image: minio/minio:latest
-    container_name: vibeponto-minio
-    restart: always
-    command: server /data --console-address ":9001"
-    volumes:
-      - minio_data:/data
-    environment:
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
-    networks:
-      - vibeponto-network
-
-  nginx:
-    image: nginx:alpine
-    container_name: vibeponto-nginx
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
-      - certbot_data:/var/www/certbot
-    depends_on:
-      - api
-      - frontend
-    networks:
-      - vibeponto-network
-
-volumes:
-  postgres_data:
-  redis_data:
-  minio_data:
-  certbot_data:
-
-networks:
-  vibeponto-network:
-    driver: bridge
-```
-
-#### Nginx Config (nginx/nginx.conf)
-
-```nginx
-events {
-    worker_connections 1024;
-}
-
-http {
-    # Rate limiting
-    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
-    limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
-
-    upstream api {
-        server api:8000;
-    }
-
-    upstream frontend {
-        server frontend:3000;
-    }
-
-    # Redirect HTTP to HTTPS
-    server {
-        listen 80;
-        server_name ponto.suaempresa.com.br api.ponto.suaempresa.com.br;
-        return 301 https://$server_name$request_uri;
-    }
-
-    # API Server
-    server {
-        listen 443 ssl http2;
-        server_name api.ponto.suaempresa.com.br;
-
-        ssl_certificate /etc/nginx/ssl/fullchain.pem;
-        ssl_certificate_key /etc/nginx/ssl/privkey.pem;
-
-        # Security headers
-        add_header X-Frame-Options DENY;
-        add_header X-Content-Type-Options nosniff;
-        add_header X-XSS-Protection "1; mode=block";
-
-        location / {
-            limit_req zone=api burst=20 nodelay;
-            
-            proxy_pass http://api;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-
-        location /api/v1/auth/login {
-            limit_req zone=login burst=5 nodelay;
-            
-            proxy_pass http://api;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-        }
-    }
-
-    # Frontend Server
-    server {
-        listen 443 ssl http2;
-        server_name ponto.suaempresa.com.br;
-
-        ssl_certificate /etc/nginx/ssl/fullchain.pem;
-        ssl_certificate_key /etc/nginx/ssl/privkey.pem;
-
-        location / {
-            proxy_pass http://frontend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-    }
-}
-```
-
-#### Iniciar Produção
+Valide sem iniciar os serviços:
 
 ```bash
-# 5. Criar diretórios
-mkdir -p nginx/ssl
-
-# 6. Obter certificado SSL (Let's Encrypt)
-apt install certbot
-certbot certonly --standalone -d ponto.suaempresa.com.br -d api.ponto.suaempresa.com.br
-cp /etc/letsencrypt/live/ponto.suaempresa.com.br/*.pem nginx/ssl/
-
-# 7. Iniciar containers
-docker compose -f docker-compose.prod.yml up -d
-
-# 8. Verificar logs
-docker logs vibeponto-api -f
-
-# 9. Criar admin inicial
-docker exec -it vibeponto-api python scripts/seed_admin.py
+docker compose --env-file .env.production -f docker-compose.prod.yml config --quiet
 ```
 
----
+## 6. Apontar o domínio no Registro.br
 
-### Opção 2: Cloud Gerenciado (AWS/GCP/Azure)
+No painel do domínio, abra **DNS > Editar zona** e crie três registros `A`:
 
-#### AWS (Elastic Container Service)
+| Nome | Tipo | Destino |
+|---|---|---|
+| `@` (ou vazio) | A | `IP_DO_SERVIDOR` |
+| `www` | A | `IP_DO_SERVIDOR` |
+| `storage` | A | `IP_DO_SERVIDOR` |
 
-```
-Arquitetura:
-- ECS Fargate (API + Frontend)
-- RDS PostgreSQL
-- ElastiCache Redis
-- S3 para arquivos
-- CloudFront CDN
-- ACM para SSL
-- Route 53 DNS
-```
+Não use o redirecionamento web do Registro.br. O domínio precisa apontar por DNS
+diretamente para a VPS. Se houver registros `AAAA` antigos, remova-os por enquanto;
+adicione IPv6 somente depois de testar a conectividade IPv6 do servidor.
 
-Custo estimado: $100-200/mês (mínimo)
+Confira a propagação no computador local:
 
-#### Google Cloud (Cloud Run)
-
-```
-Arquitetura:
-- Cloud Run (API + Frontend)
-- Cloud SQL PostgreSQL
-- Memorystore Redis
-- Cloud Storage
-- Cloud CDN
-- Cloud Armor (WAF)
+```powershell
+Resolve-DnsName vibeponto.com.br
+Resolve-DnsName www.vibeponto.com.br
+Resolve-DnsName storage.vibeponto.com.br
 ```
 
-Custo estimado: $80-150/mês (mínimo)
+Os três nomes devem retornar o IPv4 da Hetzner.
 
----
+## 7. Subir a produção
 
-### Opção 3: Plataformas PaaS
+Depois que o DNS estiver apontando para o servidor:
 
-#### Railway.app (Mais simples)
-1. Conectar repositório GitHub
-2. Configurar variáveis de ambiente
-3. Deploy automático
-
-Custo: $20-50/mês
-
-#### Render.com
-Similar ao Railway, com bom tier gratuito para testes.
-
----
-
-## 🔄 CI/CD com GitHub Actions
-
-### .github/workflows/deploy.yml
-
-```yaml
-name: Deploy Production
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
-        run: |
-          cd backend
-          pip install -r requirements.txt
-          
-      - name: Run tests
-        run: |
-          cd backend
-          pytest -v
-
-  deploy:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Deploy to server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          script: |
-            cd /opt/vibeponto
-            git pull origin main
-            docker compose -f docker-compose.prod.yml build
-            docker compose -f docker-compose.prod.yml up -d
-```
-
----
-
-## 📊 Monitoramento
-
-### Logs
-```bash
-# Ver logs em tempo real
-docker logs vibeponto-api -f --tail 100
-
-# Logs do nginx
-docker logs vibeponto-nginx -f
-```
-
-### Métricas (Opcional)
-
-Adicionar Prometheus + Grafana:
-
-```yaml
-# Adicionar ao docker-compose.prod.yml
-prometheus:
-  image: prom/prometheus
-  volumes:
-    - ./prometheus.yml:/etc/prometheus/prometheus.yml
-
-grafana:
-  image: grafana/grafana
-  ports:
-    - "3001:3000"
-```
-
----
-
-## 🔐 Backup
-
-### Script de Backup (backup.sh)
-
-```bash
-#!/bin/bash
-DATE=$(date +%Y%m%d_%H%M%S)
-BACKUP_DIR=/opt/backups
-
-# Backup PostgreSQL
-docker exec vibeponto-postgres pg_dump -U vibeponto_prod vibeponto_prod > $BACKUP_DIR/db_$DATE.sql
-gzip $BACKUP_DIR/db_$DATE.sql
-
-# Backup MinIO
-docker exec vibeponto-minio mc mirror /data $BACKUP_DIR/minio_$DATE
-
-# Limpar backups antigos (manter 7 dias)
-find $BACKUP_DIR -mtime +7 -delete
-
-echo "Backup completed: $DATE"
-```
-
-### Cron para backup diário
-```bash
-crontab -e
-# Adicionar:
-0 2 * * * /opt/vibeponto/backup.sh >> /var/log/backup.log 2>&1
-```
-
----
-
-## 🆘 Troubleshooting
-
-### API não inicia
-```bash
-# Ver logs detalhados
-docker logs vibeponto-api --tail 100
-
-# Verificar conexão com banco
-docker exec -it vibeponto-api python -c "from app.core.database import engine; print('OK')"
-```
-
-### Erro de conexão banco
-```bash
-# Verificar se postgres está rodando
-docker exec -it vibeponto-postgres pg_isready
-
-# Verificar conexão
-docker exec -it vibeponto-postgres psql -U vibeponto_prod -c "SELECT 1"
-```
-
-### Frontend não carrega
-```bash
-# Verificar build
-docker logs vibeponto-frontend
-
-# Rebuild
-docker compose build frontend --no-cache
-docker compose up -d frontend
-```
-
-### SSL/Certificado expirado
-```bash
-# Renovar Let's Encrypt
-certbot renew
-docker restart vibeponto-nginx
-```
-
----
-
-## 📝 Manutenção
-
-### Atualizar sistema
 ```bash
 cd /opt/vibeponto
-git pull origin main
-docker compose -f docker-compose.prod.yml build
-docker compose -f docker-compose.prod.yml up -d
+docker compose --env-file .env.production -f docker-compose.prod.yml build --pull
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+docker compose --env-file .env.production -f docker-compose.prod.yml ps
 ```
 
-### Limpar recursos Docker
+O serviço `migrate` deve terminar com código 0. Os demais devem ficar em execução
+ou saudáveis. Acompanhe os logs iniciais:
+
 ```bash
-docker system prune -a --volumes
+docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=100 api frontend caddy
 ```
 
-### Verificar uso de disco
+O Caddy obtém e renova o certificado automaticamente quando o DNS aponta para a
+VPS e as portas 80/443 estão abertas.
+
+## 8. Validar e criar a primeira empresa
+
+No computador local:
+
+```powershell
+curl.exe -I https://vibeponto.com.br
+curl.exe https://vibeponto.com.br/health
+curl.exe https://vibeponto.com.br/ready
+```
+
+Depois acesse:
+
+- `https://vibeponto.com.br/registro` para criar a primeira empresa e o usuário
+  administrador;
+- `https://vibeponto.com.br/login` para entrar.
+
+Não execute `seed_demo_data.py` em produção.
+
+## 9. Backup e manutenção
+
+O backup automático da Hetzner guarda sete cópias diárias do disco. Mantenha também
+um `pg_dump` criptografado fora desta VPS; um backup no mesmo servidor não protege
+contra perda da máquina ou da conta.
+
+Backup manual do PostgreSQL:
+
 ```bash
+cd /opt/vibeponto
+mkdir -p backups
+set -a
+. ./.env.production
+set +a
+docker compose --env-file .env.production -f docker-compose.prod.yml exec -T postgres \
+  pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "backups/postgres-$(date +%F-%H%M).sql.gz"
+```
+
+Atualização da aplicação:
+
+```bash
+cd /opt/vibeponto
+git pull --ff-only
+docker compose --env-file .env.production -f docker-compose.prod.yml build --pull
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --remove-orphans
+docker compose --env-file .env.production -f docker-compose.prod.yml ps
+```
+
+Ver logs e uso de disco:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=200
 df -h
 docker system df
 ```
 
----
-
-## 💰 Custos Estimados
-
-| Componente | Opção Econômica | Produção |
-|------------|-----------------|----------|
-| VPS | $24/mês | $48/mês |
-| PostgreSQL Gerenciado | - | $25/mês |
-| Redis Gerenciado | - | $15/mês |
-| S3/Storage | $5/mês | $10/mês |
-| Domínio | $15/ano | $15/ano |
-| SSL | Grátis (Let's Encrypt) | Grátis |
-| **Total** | **~$30/mês** | **~$100/mês** |
-
----
-
-## 📞 Suporte
-
-Em caso de problemas:
-1. Verificar logs: `docker logs vibeponto-api -f`
-2. Verificar status: `docker compose ps`
-3. Consultar documentação API: `/docs`
-4. Abrir issue no repositório
+Nunca use `docker system prune --volumes`: os dados persistentes do PostgreSQL,
+MinIO, Redis, RabbitMQ e os certificados do Caddy ficam em volumes Docker.

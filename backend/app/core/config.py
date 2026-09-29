@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # App
     app_name: str = "Vibe Ponto"
     app_version: str = "0.1.0"
+    app_public_url: str = "http://localhost:3000"
     environment: Literal["development", "staging", "production"] = "development"
     debug: bool = False
     secret_key: str = Field(default="", validation_alias=AliasChoices("SECRET_KEY", "JWT_SECRET_KEY"), repr=False)
@@ -63,6 +64,7 @@ class Settings(BaseSettings):
 
     # Storage (MinIO/S3)
     storage_endpoint: str = "http://localhost:9000"
+    storage_public_endpoint: str = ""
     storage_access_key: str = "minio"
     storage_secret_key: str = "minio123"
     storage_bucket: str = "vibe-ponto"

@@ -30,18 +30,32 @@ class StorageService:
 
     def __init__(self):
         self.endpoint_url = settings.storage_endpoint
+        self.public_endpoint_url = settings.storage_public_endpoint or self.endpoint_url
         self.access_key = settings.storage_access_key
         self.secret_key = settings.storage_secret_key
         self.bucket = settings.storage_bucket
         self.region = settings.storage_region
 
+        client_config = Config(signature_version="s3v4", s3={"addressing_style": "path"})
         self.client = boto3.client(
             "s3",
             endpoint_url=self.endpoint_url,
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
             region_name=self.region,
-            config=Config(signature_version="s3v4"),
+            config=client_config,
+        )
+        self.public_client = (
+            self.client
+            if self.public_endpoint_url == self.endpoint_url
+            else boto3.client(
+                "s3",
+                endpoint_url=self.public_endpoint_url,
+                aws_access_key_id=self.access_key,
+                aws_secret_access_key=self.secret_key,
+                region_name=self.region,
+                config=client_config,
+            )
         )
 
         self._bucket_checked = False
@@ -192,7 +206,7 @@ class StorageService:
                 params["ResponseContentDisposition"] = f'attachment; filename="{download_filename}"'
 
             return await run_in_threadpool(
-                self.client.generate_presigned_url,
+                self.public_client.generate_presigned_url,
                 "get_object",
                 Params=params,
                 ExpiresIn=expires_in,
@@ -215,7 +229,7 @@ class StorageService:
             filename = self._validate_declared_type(filename, content_type)
             key = self._generate_key(tenant_id, folder, filename)
             url = await run_in_threadpool(
-                self.client.generate_presigned_url,
+                self.public_client.generate_presigned_url,
                 "put_object",
                 Params={
                     "Bucket": self.bucket,

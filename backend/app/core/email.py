@@ -1,15 +1,13 @@
 """Serviço de email com suporte a múltiplos providers."""
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional
 import asyncio
 import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import aiohttp
 
 from app.core.config import settings
-
 
 logger = logging.getLogger(__name__)
 
@@ -17,20 +15,20 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EmailMessage:
     """Representa uma mensagem de email."""
-    
+
     to: str | list[str]
     subject: str
     html: str
-    text: Optional[str] = None
-    from_email: Optional[str] = None
-    from_name: Optional[str] = None
-    reply_to: Optional[str] = None
-    attachments: Optional[list[dict]] = None
+    text: str | None = None
+    from_email: str | None = None
+    from_name: str | None = None
+    reply_to: str | None = None
+    attachments: list[dict] | None = None
 
 
 class EmailProvider(ABC):
     """Interface para providers de email."""
-    
+
     @abstractmethod
     async def send(self, message: EmailMessage) -> bool:
         """Envia email. Retorna True se sucesso."""
@@ -39,7 +37,7 @@ class EmailProvider(ABC):
 
 class SMTPProvider(EmailProvider):
     """Provider SMTP usando aiosmtplib."""
-    
+
     def __init__(
         self,
         host: str,
@@ -53,22 +51,23 @@ class SMTPProvider(EmailProvider):
         self.username = username
         self.password = password
         self.use_tls = use_tls
-    
+
     async def send(self, message: EmailMessage) -> bool:
         try:
-            import aiosmtplib
             from email.mime.multipart import MIMEMultipart
             from email.mime.text import MIMEText
-            
+
+            import aiosmtplib
+
             msg = MIMEMultipart("alternative")
             msg["Subject"] = message.subject
             msg["From"] = f"{message.from_name or settings.app_name} <{message.from_email or self.username}>"
             msg["To"] = message.to if isinstance(message.to, str) else ", ".join(message.to)
-            
+
             if message.text:
                 msg.attach(MIMEText(message.text, "plain"))
             msg.attach(MIMEText(message.html, "html"))
-            
+
             await aiosmtplib.send(
                 msg,
                 hostname=self.host,
@@ -85,15 +84,15 @@ class SMTPProvider(EmailProvider):
 
 class SendGridProvider(EmailProvider):
     """Provider SendGrid API."""
-    
+
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.api_url = "https://api.sendgrid.com/v3/mail/send"
-    
+
     async def send(self, message: EmailMessage) -> bool:
         try:
             recipients = message.to if isinstance(message.to, list) else [message.to]
-            
+
             payload = {
                 "personalizations": [{"to": [{"email": r} for r in recipients]}],
                 "from": {
@@ -105,10 +104,10 @@ class SendGridProvider(EmailProvider):
                     {"type": "text/html", "value": message.html},
                 ],
             }
-            
+
             if message.reply_to:
                 payload["reply_to"] = {"email": message.reply_to}
-            
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     self.api_url,
@@ -126,25 +125,25 @@ class SendGridProvider(EmailProvider):
 
 class AWSProvider(EmailProvider):
     """Provider AWS SES."""
-    
+
     def __init__(self, region: str, access_key: str, secret_key: str):
         self.region = region
         self.access_key = access_key
         self.secret_key = secret_key
-    
+
     async def send(self, message: EmailMessage) -> bool:
         try:
             import boto3
-            
+
             ses = boto3.client(
                 "ses",
                 region_name=self.region,
                 aws_access_key_id=self.access_key,
                 aws_secret_access_key=self.secret_key,
             )
-            
+
             recipients = message.to if isinstance(message.to, list) else [message.to]
-            
+
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: ses.send_email(
@@ -167,7 +166,7 @@ class AWSProvider(EmailProvider):
 
 class ConsoleProvider(EmailProvider):
     """Provider para desenvolvimento - imprime no console."""
-    
+
     async def send(self, message: EmailMessage) -> bool:
         logger.info(f"""
 ╔══════════════════════════════════════════════════════════════╗
@@ -184,14 +183,14 @@ class ConsoleProvider(EmailProvider):
 
 class EmailService:
     """Serviço central de email."""
-    
+
     def __init__(self):
-        self._provider: Optional[EmailProvider] = None
-    
+        self._provider: EmailProvider | None = None
+
     def configure(self, provider: EmailProvider) -> None:
         """Configura o provider de email."""
         self._provider = provider
-    
+
     @property
     def provider(self) -> EmailProvider:
         if self._provider is None:
@@ -200,19 +199,19 @@ class EmailService:
                 return ConsoleProvider()
             raise RuntimeError("Email provider não configurado")
         return self._provider
-    
+
     async def send(self, message: EmailMessage) -> bool:
         """Envia email."""
         return await self.provider.send(message)
-    
+
     # =========================================================================
     # Templates
     # =========================================================================
-    
+
     async def send_password_reset(self, email: str, token: str, nome: str) -> bool:
         """Envia email de reset de senha."""
-        reset_url = f"https://app.vibeponto.com.br/reset-password?token={token}"
-        
+        reset_url = f"{settings.app_public_url.rstrip('/')}/redefinir-senha?token={token}"
+
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -248,17 +247,17 @@ class EmailService:
         </body>
         </html>
         """
-        
+
         return await self.send(EmailMessage(
             to=email,
             subject="🔐 Redefinição de Senha - VibePonto",
             html=html,
         ))
-    
+
     async def send_welcome(self, email: str, nome: str, senha_temporaria: str) -> bool:
         """Envia email de boas-vindas com senha temporária."""
-        login_url = "https://app.vibeponto.com.br/login"
-        
+        login_url = f"{settings.app_public_url.rstrip('/')}/login"
+
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -297,13 +296,13 @@ class EmailService:
         </body>
         </html>
         """
-        
+
         return await self.send(EmailMessage(
             to=email,
             subject="🎉 Bem-vindo ao VibePonto!",
             html=html,
         ))
-    
+
     async def send_marcacao_suspeita(
         self,
         gestor_email: str,
@@ -313,6 +312,7 @@ class EmailService:
         motivo: str,
     ) -> bool:
         """Notifica gestor sobre marcação suspeita."""
+        auditoria_url = f"{settings.app_public_url.rstrip('/')}/dashboard/auditoria"
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -341,7 +341,7 @@ class EmailService:
                         <p><strong>Data/Hora:</strong> {data_hora}</p>
                         <p><strong>Motivo:</strong> {motivo}</p>
                     </div>
-                    <a href="https://app.vibeponto.com.br/auditoria" class="button">Revisar no Sistema</a>
+                    <a href="{auditoria_url}" class="button">Revisar no Sistema</a>
                 </div>
                 <div class="footer">
                     <p>© 2025 VibePonto. Todos os direitos reservados.</p>
@@ -350,13 +350,13 @@ class EmailService:
         </body>
         </html>
         """
-        
+
         return await self.send(EmailMessage(
             to=gestor_email,
             subject="⚠️ Marcação Suspeita Detectada - VibePonto",
             html=html,
         ))
-    
+
     async def send_espelho_mensal(
         self,
         email: str,
@@ -399,7 +399,7 @@ class EmailService:
         </body>
         </html>
         """
-        
+
         return await self.send(EmailMessage(
             to=email,
             subject=f"📋 Espelho de Ponto {mes}/{ano} - VibePonto",
@@ -414,13 +414,18 @@ email_service = EmailService()
 def configure_email_service() -> None:
     """Configura o serviço de email baseado nas variáveis de ambiente."""
     import os
-    
-    provider_type = os.getenv("EMAIL_PROVIDER", "console")
-    
+
+    provider_type = os.getenv(
+        "EMAIL_PROVIDER",
+        "console" if settings.environment == "development" else "disabled",
+    ).lower()
+
     if provider_type == "sendgrid":
         api_key = os.getenv("SENDGRID_API_KEY")
         if api_key:
             email_service.configure(SendGridProvider(api_key))
+        else:
+            logger.warning("SendGrid email provider is missing SENDGRID_API_KEY")
     elif provider_type == "ses":
         email_service.configure(AWSProvider(
             region=os.getenv("AWS_REGION", "us-east-1"),
@@ -428,11 +433,19 @@ def configure_email_service() -> None:
             secret_key=os.getenv("AWS_SECRET_ACCESS_KEY", ""),
         ))
     elif provider_type == "smtp":
-        email_service.configure(SMTPProvider(
-            host=os.getenv("SMTP_HOST", "smtp.gmail.com"),
-            port=int(os.getenv("SMTP_PORT", "587")),
-            username=os.getenv("SMTP_USERNAME", ""),
-            password=os.getenv("SMTP_PASSWORD", ""),
-        ))
-    else:
+        username = os.getenv("SMTP_USERNAME", "")
+        password = os.getenv("SMTP_PASSWORD", "")
+        if username and password:
+            email_service.configure(SMTPProvider(
+                host=os.getenv("SMTP_HOST", "smtp.gmail.com"),
+                port=int(os.getenv("SMTP_PORT", "587")),
+                username=username,
+                password=password,
+                use_tls=os.getenv("SMTP_USE_TLS", "true").lower() == "true",
+            ))
+        else:
+            logger.warning("SMTP email provider is missing credentials")
+    elif provider_type == "console" and settings.environment == "development":
         email_service.configure(ConsoleProvider())
+    elif provider_type != "disabled":
+        logger.warning("Email provider is invalid or unavailable", extra={"provider": provider_type})
