@@ -8,6 +8,7 @@ import socket
 import urllib.parse
 from typing import List, Tuple
 
+import httpx
 from app.core.config import settings
 
 logger = logging.getLogger("app.security.webhook")
@@ -26,6 +27,47 @@ FORBIDDEN_NETWORKS = [
     ipaddress.ip_network("fe80::/10"),         # Link-local IPv6
     ipaddress.ip_network("ff00::/8"),          # Multicast IPv6
 ]
+
+
+class PinningAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    """
+    HTTP Transport subclass that pins TCP/TLS connections to a pre-validated IP address
+    while keeping the original hostname for TLS SNI server verification and the Host header.
+    Prevents TOCTOU (Time of Check to Time of Use) / DNS Rebinding attacks.
+    """
+    def __init__(self, target_ip: str, original_host: str, **kwargs):
+        super().__init__(**kwargs)
+        self.target_ip = target_ip
+        self.original_host = original_host
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        # Override URL host for low-level connection to target_ip
+        request.url = request.url.copy_with(host=self.target_ip)
+        request.headers["Host"] = self.original_host
+        request.extensions["sni_hostname"] = self.original_host
+        return await super().handle_async_request(request)
+
+
+def create_pinned_client(
+    target_ip: str,
+    original_host: str,
+    timeout: float = 5.0,
+    **kwargs
+) -> httpx.AsyncClient:
+    """
+    Create an AsyncClient configured with IP pinning, verify=True, and follow_redirects=False.
+    """
+    transport = PinningAsyncHTTPTransport(
+        target_ip=target_ip,
+        original_host=original_host,
+        verify=kwargs.pop("verify", True),
+    )
+    return httpx.AsyncClient(
+        transport=transport,
+        follow_redirects=False,
+        timeout=timeout,
+        **kwargs
+    )
 
 
 def is_ip_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

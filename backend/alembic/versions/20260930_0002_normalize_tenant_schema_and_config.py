@@ -70,10 +70,18 @@ def upgrade() -> None:
                 cfg = {}
 
         normalized = normalize_config(cfg or {})
-        connection.execute(
-            sa.text("UPDATE tenants SET config = :config WHERE id = :id"),
-            {"config": json.dumps(normalized), "id": tenant_id}
-        )
+        if connection.dialect.name == "postgresql":
+            stmt = sa.text("UPDATE tenants SET config = :config WHERE id = :id").bindparams(
+                sa.bindparam("config", type_=JSONB),
+                sa.bindparam("id"),
+            )
+            connection.execute(stmt, {"config": normalized, "id": tenant_id})
+        else:
+            stmt = sa.text("UPDATE tenants SET config = :config WHERE id = :id").bindparams(
+                sa.bindparam("config", type_=sa.JSON),
+                sa.bindparam("id"),
+            )
+            connection.execute(stmt, {"config": normalized, "id": tenant_id})
 
 
 def downgrade() -> None:

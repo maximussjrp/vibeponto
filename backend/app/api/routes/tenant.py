@@ -17,7 +17,7 @@ from app.api.deps import (
     get_db,
     get_tenant_context,
 )
-from app.core.security_webhook import validate_webhook_url
+from app.core.security_webhook import create_pinned_client, validate_webhook_url
 from app.models import Tenant, Usuario, Equipe, MarcacaoPonto, UserStatus
 
 
@@ -566,16 +566,16 @@ async def testar_webhook(
         return {"sucesso": False, "mensagem": "URL do webhook não configurada"}
 
     try:
-        validate_webhook_url(webhook_url)
+        clean_url, hostname, target_ip, port = validate_webhook_url(webhook_url)
     except ValueError as val_err:
         logger.warning(f"Teste de webhook bloqueado por validação de segurança: {str(val_err)}")
         return {"sucesso": False, "mensagem": "URL de webhook inválida ou não permitida"}
 
     try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=5.0) as client:
+        async with create_pinned_client(target_ip=target_ip, original_host=hostname, timeout=5.0) as client:
             async with client.stream(
                 "POST",
-                webhook_url,
+                clean_url,
                 json={"evento": "teste", "tenant_id": str(tenant.tenant_id)},
             ) as response:
                 status_code = response.status_code

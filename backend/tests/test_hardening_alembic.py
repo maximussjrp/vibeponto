@@ -12,7 +12,9 @@ import app.core.database as database_module
 from alembic import command
 from app.core.database import Base
 
-TEST_DATABASE_URL = "postgresql+asyncpg://test:test@localhost:55432/hardening_r2"
+import os
+
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:54399/test_vibeponto")
 
 
 async def reset_database():
@@ -41,4 +43,4 @@ def test_alembic_upgrade_head_on_empty_database(monkeypatch):
     alembic_cfg = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     command.upgrade(alembic_cfg, "head")
 
-    assert asyncio.run(current_version()) == "20260917_0001"
+    assert asyncio.run(current_version()) == "20260930_0002"
