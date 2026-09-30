@@ -1,48 +1,56 @@
 /**
- * Serviço de API para Configurações e Empresa
+ * Serviço de API para Configurações e Empresa (Vibe Ponto)
  */
 
 import api from "@/lib/api";
 
-// Tipos
+// Tipos de Endereço Estruturado
+export interface Endereco {
+  cep?: string;
+  logradouro?: string;
+  numero?: string;
+  complemento?: string;
+  bairro?: string;
+  municipio?: string;
+  cidade?: string;
+  uf?: string;
+  estado?: string;
+  pais?: string;
+}
+
+// Tipos Corporativos do Tenant
 export interface Tenant {
   id: string;
   nome: string;
   cnpj: string;
   razao_social?: string;
-  endereco?: string;
-  cidade?: string;
-  estado?: string;
-  cep?: string;
+  endereco?: Endereco | string;
   telefone?: string;
   email?: string;
-  logo_url?: string;
+  slug?: string;
+  plano?: "starter" | "professional" | "enterprise";
   ativo: boolean;
-  plano: "starter" | "professional" | "enterprise";
-  limite_usuarios: number;
-  created_at: string;
-  updated_at: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface TenantUpdate {
   nome?: string;
   razao_social?: string;
-  endereco?: string;
-  cidade?: string;
-  estado?: string;
-  cep?: string;
-  telefone?: string;
   email?: string;
+  telefone?: string;
+  endereco?: Endereco | string;
 }
 
+// Seções de Configurações Canônicas
 export interface ConfiguracoesPonto {
   tolerancia_minutos: number;
   intervalo_minimo: number;  // minutos
-  jornada_diaria: number;  // horas
-  jornada_semanal: number;  // horas
+  jornada_diaria: number;     // horas
+  jornada_semanal: number;    // horas
   hora_extra_automatica: boolean;
   banco_horas_ativo: boolean;
-  banco_horas_limite: number;  // horas
+  banco_horas_limite: number; // horas
   exigir_foto: boolean;
   exigir_geolocalizacao: boolean;
   permitir_offline: boolean;
@@ -72,34 +80,18 @@ export interface ConfiguracoesSeguranca {
 
 export interface ConfiguracoesIntegracoes {
   webhook_url?: string;
-  webhook_secret?: string;
+  webhook_secret_configurado?: boolean;
+  webhook_secret?: string; // apenas envio (write-only)
   api_folha_ativa: boolean;
   api_folha_url?: string;
-  api_folha_token?: string;
+  api_folha_token_configurado?: boolean;
+  api_folha_token?: string; // apenas envio (write-only)
 }
 
-
-export interface Configuracoes {
-  tolerancia_atraso_minutos: number;
-  tolerancia_saida_antecipada_minutos: number;
-  horas_jornada_padrao: number;
-  intervalo_almoco_minutos: number;
-  permite_ponto_fora_perimetro: boolean;
-  exige_foto_ponto: boolean;
-  exige_geolocalizacao: boolean;
-  notificar_atrasos: boolean;
-  notificar_horas_extras: boolean;
-  dias_retroativos_correcao: number;
-  aprovacao_automatica: boolean;
-  fuso_horario: string;
-}
-
-export type ConfiguracoesUpdate = Partial<Configuracoes>;
-
-// Funções de API
+// Funções de API Corporativa
 export const empresaService = {
   /**
-   * Buscar dados da empresa (tenant)
+   * Buscar dados corporativos da empresa (tenant)
    */
   async get(): Promise<Tenant> {
     const { data } = await api.get("/tenant");
@@ -111,7 +103,7 @@ export const empresaService = {
   },
 
   /**
-   * Atualizar dados da empresa
+   * Atualizar dados corporativos da empresa
    */
   async update(tenant: TenantUpdate): Promise<Tenant> {
     const { data } = await api.patch("/tenant", tenant);
@@ -120,28 +112,6 @@ export const empresaService = {
 
   async updateTenant(tenant: TenantUpdate): Promise<Tenant> {
     return this.update(tenant);
-  },
-
-  async getConfiguracoes(): Promise<Configuracoes> {
-    const { data } = await api.get("/configuracoes");
-    return data;
-  },
-
-  async updateConfiguracoes(config: ConfiguracoesUpdate): Promise<Configuracoes> {
-    const { data } = await api.patch("/configuracoes", config);
-    return data;
-  },
-
-  /**
-   * Upload de logo
-   */
-  async uploadLogo(arquivo: File): Promise<{ logo_url: string }> {
-    const formData = new FormData();
-    formData.append("arquivo", arquivo);
-    const { data } = await api.post("/tenant/logo", formData, {
-      headers: { "Content-Type": "multipart/form-data" },
-    });
-    return data;
   },
 
   /**
@@ -159,6 +129,7 @@ export const empresaService = {
   },
 };
 
+// Funções de API de Configurações Canônicas
 export const configuracoesService = {
   /**
    * Buscar configurações de ponto
@@ -209,7 +180,7 @@ export const configuracoesService = {
   },
 
   /**
-   * Buscar configurações de integrações
+   * Buscar configurações de integrações (sem segredos)
    */
   async getIntegracoes(): Promise<ConfiguracoesIntegracoes> {
     const { data } = await api.get("/configuracoes/integracoes");
@@ -225,7 +196,7 @@ export const configuracoesService = {
   },
 
   /**
-   * Testar webhook
+   * Testar webhook (com validação SSRF no backend)
    */
   async testarWebhook(): Promise<{ sucesso: boolean; mensagem: string }> {
     const { data } = await api.post("/configuracoes/integracoes/testar-webhook");
