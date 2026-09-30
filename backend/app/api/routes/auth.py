@@ -142,6 +142,7 @@ async def register_tenant(
     tenant = Tenant(
         id=tenant_id,
         nome=request.empresa_nome,
+        razao_social=request.empresa_nome,
         cnpj=request.empresa_cnpj,
         email=request.empresa_email,
         telefone=request.empresa_telefone,
@@ -149,12 +150,46 @@ async def register_tenant(
         config={
             "slug": slug,
             "plano": request.plano,
-            "jornada_diaria": 8,
-            "tolerancia_minutos": 10,
-            "permite_hora_extra": True,
-            "requer_foto": True,
-            "requer_geolocalizacao": True,
-        }
+            "ponto": {
+                "jornada_diaria": 8,
+                "jornada_semanal": 44,
+                "tolerancia_minutos": 10,
+                "intervalo_minimo": 60,
+                "hora_extra_automatica": True,
+                "banco_horas_ativo": False,
+                "banco_horas_limite": 40,
+                "exigir_foto": True,
+                "exigir_geolocalizacao": True,
+                "permitir_offline": True,
+                "notificar_atraso": True,
+                "notificar_hora_extra": True,
+            },
+            "notificacoes": {
+                "email_ativo": True,
+                "push_ativo": True,
+                "notificar_marcacao": True,
+                "notificar_aprovacao": True,
+                "notificar_documento": True,
+                "notificar_alerta": True,
+                "horario_lembrete_entrada": None,
+                "horario_lembrete_saida": None,
+            },
+            "seguranca": {
+                "mfa_obrigatorio": False,
+                "sessao_unica": False,
+                "tempo_sessao": 480,
+                "tentativas_login": 5,
+                "bloquear_dispositivo": False,
+                "ips_permitidos": None,
+            },
+            "integracoes": {
+                "webhook_url": None,
+                "webhook_secret": None,
+                "api_folha_ativa": False,
+                "api_folha_url": None,
+                "api_folha_token": None,
+            },
+        },
     )
     db.add(tenant)
 

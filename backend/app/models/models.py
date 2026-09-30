@@ -189,6 +189,7 @@ class Tenant(Base, TimestampMixin):
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4
     )
     nome: Mapped[str] = mapped_column(String(255), nullable=False)
+    razao_social: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     cnpj: Mapped[str] = mapped_column(String(18), unique=True, nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     telefone: Mapped[Optional[str]] = mapped_column(String(20))

@@ -14,6 +14,18 @@ import httpx
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
+import socket
+
+def _is_live_server_available():
+    try:
+        with socket.create_connection(("localhost", 8000), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+if not _is_live_server_available():
+    pytestmark = pytest.mark.skip(reason="E2E live API server on http://localhost:8000 is not running")
+
 # Configuração de teste
 TEST_DATABASE_URL = "postgresql+asyncpg://vibeponto:vibeponto_dev_123@localhost:5432/vibeponto_test"
 API_BASE_URL = "http://localhost:8000/api/v1"

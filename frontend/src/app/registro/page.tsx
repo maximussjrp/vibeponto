@@ -176,7 +176,7 @@ export default function RegisterPage() {
         plano: data.plano,
       });
 
-      toast.success("Cadastro realizado com sucesso! Verifique seu email.");
+      toast.success("Cadastro realizado com sucesso. Faça login para continuar.");
       router.push("/login?registered=true");
     } catch (error) {
       toast.error(getErrorMessage(error));

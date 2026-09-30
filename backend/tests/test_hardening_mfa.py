@@ -20,7 +20,9 @@ from app.services.mfa import (
     verify_mfa_code,
 )
 
-TEST_DATABASE_URL = "postgresql+asyncpg://test:test@localhost:55432/hardening_r2"
+import os
+
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:54399/test_vibeponto")
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
