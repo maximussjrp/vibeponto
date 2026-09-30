@@ -1,10 +1,11 @@
 """Router de tenant (empresa) e configurações."""
 
-from typing import Annotated, Optional
+import logging
+from typing import Annotated, Any, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,8 +17,11 @@ from app.api.deps import (
     get_db,
     get_tenant_context,
 )
-from app.models import Tenant, Usuario, Equipe, MarcacaoPonto
+from app.core.security_webhook import validate_webhook_url
+from app.models import Tenant, Usuario, Equipe, MarcacaoPonto, UserStatus
 
+
+logger = logging.getLogger("app.api.tenant")
 
 router = APIRouter(tags=["Empresa"])
 
@@ -26,15 +30,29 @@ router = APIRouter(tags=["Empresa"])
 # SCHEMAS
 # ============================================================================
 
+class EnderecoSchema(BaseModel):
+    """Schema de endereço corporativo estruturado."""
+    cep: Optional[str] = None
+    logradouro: Optional[str] = None
+    numero: Optional[str] = None
+    complemento: Optional[str] = None
+    bairro: Optional[str] = None
+    municipio: Optional[str] = None
+    uf: Optional[str] = None
+    pais: Optional[str] = "Brasil"
+
+
 class TenantRead(BaseModel):
-    """Schema de leitura do tenant."""
+    """Schema de leitura do tenant (dados corporativos não sensíveis)."""
     id: UUID
     nome: str
+    razao_social: Optional[str] = None
     cnpj: str
     email: str
     telefone: Optional[str] = None
-    endereco: Optional[dict] = None
-    config: Optional[dict] = None
+    endereco: Optional[EnderecoSchema] = None
+    slug: Optional[str] = None
+    plano: Optional[str] = None
     ativo: bool
 
     class Config:
@@ -42,11 +60,12 @@ class TenantRead(BaseModel):
 
 
 class TenantUpdate(BaseModel):
-    """Schema de atualização do tenant."""
+    """Schema de atualização dos dados corporativos do tenant."""
     nome: Optional[str] = Field(None, min_length=2, max_length=255)
-    email: Optional[str] = None
+    razao_social: Optional[str] = Field(None, max_length=255)
+    email: Optional[EmailStr] = None
     telefone: Optional[str] = None
-    endereco: Optional[dict] = None
+    endereco: Optional[Union[EnderecoSchema, dict, str]] = None
 
 
 class TenantEstatisticas(BaseModel):
@@ -96,13 +115,90 @@ class ConfiguracoesSeguranca(BaseModel):
     ips_permitidos: Optional[list[str]] = None
 
 
-class ConfiguracoesIntegracoes(BaseModel):
-    """Configurações de integrações."""
+class ConfiguracoesIntegracoesRead(BaseModel):
+    """Configurações de integrações para leitura (sem segredos)."""
     webhook_url: Optional[str] = None
-    webhook_secret: Optional[str] = None
+    webhook_secret_configurado: bool = False
     api_folha_ativa: bool = False
     api_folha_url: Optional[str] = None
-    api_folha_token: Optional[str] = None
+    api_folha_token_configurado: bool = False
+
+
+class ConfiguracoesIntegracoesUpdate(BaseModel):
+    """Configurações de integrações para atualização (escrita apenas)."""
+    webhook_url: Optional[str] = None
+    webhook_secret: Optional[str] = None  # Write-only
+    api_folha_ativa: Optional[bool] = None
+    api_folha_url: Optional[str] = None
+    api_folha_token: Optional[str] = None  # Write-only
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def parse_endereco_dict(raw_endereco: Any) -> Optional[dict]:
+    """Parse address input into a clean dictionary for EnderecoSchema."""
+    if not raw_endereco:
+        return None
+    if isinstance(raw_endereco, str):
+        return {"logradouro": raw_endereco, "pais": "Brasil"}
+    if isinstance(raw_endereco, dict):
+        d = dict(raw_endereco)
+        if "cidade" in d and "municipio" not in d:
+            d["municipio"] = d["cidade"]
+        if "estado" in d and "uf" not in d:
+            d["uf"] = d["estado"]
+        return d
+    if isinstance(raw_endereco, EnderecoSchema):
+        return raw_endereco.model_dump()
+    return None
+
+
+def normalize_tenant_config(config: Optional[dict]) -> dict:
+    """Normalizar a estrutura do objeto JSON config do tenant."""
+    if config is None:
+        config = {}
+    
+    cfg = dict(config)
+    ponto = dict(cfg.get("ponto") or {})
+    notificacoes = dict(cfg.get("notificacoes") or {})
+    seguranca = dict(cfg.get("seguranca") or {})
+    integracoes = dict(cfg.get("integracoes") or {})
+
+    # Migrar chaves antigas de raiz se não existirem na seção ponto
+    if "jornada_diaria" in cfg and "jornada_diaria" not in ponto:
+        ponto["jornada_diaria"] = cfg["jornada_diaria"]
+    if "tolerancia_minutos" in cfg and "tolerancia_minutos" not in ponto:
+        ponto["tolerancia_minutos"] = cfg["tolerancia_minutos"]
+    if "requer_foto" in cfg and "exigir_foto" not in ponto:
+        ponto["exigir_foto"] = cfg["requer_foto"]
+    if "requer_geolocalizacao" in cfg and "exigir_geolocalizacao" not in ponto:
+        ponto["exigir_geolocalizacao"] = cfg["requer_geolocalizacao"]
+    if "permite_hora_extra" in cfg and "hora_extra_automatica" not in ponto:
+        ponto["hora_extra_automatica"] = cfg["permite_hora_extra"]
+
+    cfg["ponto"] = ponto
+    cfg["notificacoes"] = notificacoes
+    cfg["seguranca"] = seguranca
+    cfg["integracoes"] = integracoes
+    return cfg
+
+
+def get_config_section(config: dict, section: str, default_model) -> dict:
+    """Extrair seção de configuração com valores padrão e normalização."""
+    normalized = normalize_tenant_config(config)
+    section_data = normalized.get(section, {})
+    default_data = default_model().model_dump()
+    return {**default_data, **section_data}
+
+
+def update_config_section(config: dict, section: str, data: dict) -> dict:
+    """Atualizar seção de configuração preservando chaves existentes."""
+    normalized = normalize_tenant_config(config)
+    current_section = normalized.get(section, {})
+    normalized[section] = {**current_section, **data}
+    return normalized
 
 
 # ============================================================================
@@ -115,7 +211,7 @@ async def get_tenant(
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Buscar dados do tenant atual."""
+    """Buscar dados do tenant atual (somente dados corporativos públicos/não sensíveis)."""
     result = await db.execute(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
@@ -127,7 +223,23 @@ async def get_tenant(
             detail="Tenant não encontrado",
         )
     
-    return TenantRead.model_validate(tenant_obj)
+    config = tenant_obj.config or {}
+    slug = config.get("slug")
+    plano = config.get("plano")
+    endereco_parsed = parse_endereco_dict(tenant_obj.endereco)
+
+    return TenantRead(
+        id=tenant_obj.id,
+        nome=tenant_obj.nome,
+        razao_social=tenant_obj.razao_social or tenant_obj.nome,
+        cnpj=tenant_obj.cnpj,
+        email=tenant_obj.email,
+        telefone=tenant_obj.telefone,
+        endereco=EnderecoSchema(**endereco_parsed) if endereco_parsed else None,
+        slug=slug,
+        plano=plano,
+        ativo=tenant_obj.ativo,
+    )
 
 
 @router.patch("/tenant", response_model=TenantRead)
@@ -137,7 +249,7 @@ async def update_tenant(
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Atualizar dados do tenant."""
+    """Atualizar dados corporativos do tenant (somente Admin DP)."""
     result = await db.execute(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
@@ -150,13 +262,33 @@ async def update_tenant(
         )
     
     update_data = data.model_dump(exclude_unset=True)
+    if "endereco" in update_data and update_data["endereco"] is not None:
+        update_data["endereco"] = parse_endereco_dict(update_data["endereco"])
+
     for field, value in update_data.items():
-        setattr(tenant_obj, field, value)
+        if hasattr(tenant_obj, field):
+            setattr(tenant_obj, field, value)
     
     await db.commit()
     await db.refresh(tenant_obj)
     
-    return TenantRead.model_validate(tenant_obj)
+    config = tenant_obj.config or {}
+    slug = config.get("slug")
+    plano = config.get("plano")
+    endereco_parsed = parse_endereco_dict(tenant_obj.endereco)
+
+    return TenantRead(
+        id=tenant_obj.id,
+        nome=tenant_obj.nome,
+        razao_social=tenant_obj.razao_social or tenant_obj.nome,
+        cnpj=tenant_obj.cnpj,
+        email=tenant_obj.email,
+        telefone=tenant_obj.telefone,
+        endereco=EnderecoSchema(**endereco_parsed) if endereco_parsed else None,
+        slug=slug,
+        plano=plano,
+        ativo=tenant_obj.ativo,
+    )
 
 
 @router.get("/tenant/estatisticas", response_model=TenantEstatisticas)
@@ -165,19 +297,19 @@ async def get_estatisticas(
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Buscar estatísticas do tenant."""
-    from datetime import datetime, date
+    """Buscar estatísticas corporativas do tenant."""
+    from datetime import date
     
     # Total usuários
     total_usuarios = await db.execute(
         select(func.count(Usuario.id)).where(Usuario.tenant_id == tenant.tenant_id)
     )
     
-    # Usuários ativos
+    # Usuários ativos (correção para UserStatus.ACTIVE / "active")
     usuarios_ativos = await db.execute(
         select(func.count(Usuario.id)).where(
             Usuario.tenant_id == tenant.tenant_id,
-            Usuario.status == "ativo",
+            Usuario.status == UserStatus.ACTIVE,
         )
     )
     
@@ -200,28 +332,13 @@ async def get_estatisticas(
         usuarios_ativos=usuarios_ativos.scalar_one() or 0,
         total_equipes=total_equipes.scalar_one() or 0,
         marcacoes_hoje=marcacoes_hoje.scalar_one() or 0,
-        alertas_pendentes=0,  # TODO: Implementar contador de alertas
+        alertas_pendentes=0,  # Não implementado no momento
     )
 
 
 # ============================================================================
 # ROTAS - CONFIGURAÇÕES
 # ============================================================================
-
-def get_config_section(config: dict, section: str, default_model) -> dict:
-    """Extrair seção de configuração com valores padrão."""
-    section_data = config.get(section, {})
-    default_data = default_model().model_dump()
-    return {**default_data, **section_data}
-
-
-def update_config_section(config: dict, section: str, data: dict) -> dict:
-    """Atualizar seção de configuração."""
-    if config is None:
-        config = {}
-    config[section] = {**config.get(section, {}), **data}
-    return config
-
 
 @router.get("/configuracoes/ponto", response_model=ConfiguracoesPonto)
 async def get_configuracoes_ponto(
@@ -355,30 +472,38 @@ async def update_configuracoes_seguranca(
     return data
 
 
-@router.get("/configuracoes/integracoes", response_model=ConfiguracoesIntegracoes)
+@router.get("/configuracoes/integracoes", response_model=ConfiguracoesIntegracoesRead)
 async def get_configuracoes_integracoes(
     current_user: RequireAdmin,
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Buscar configurações de integrações."""
+    """Buscar configurações de integrações (sem segredos)."""
     result = await db.execute(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
     
     config = tenant_obj.config or {} if tenant_obj else {}
-    return ConfiguracoesIntegracoes(**get_config_section(config, "integracoes", ConfiguracoesIntegracoes))
+    integracoes = config.get("integracoes", {})
+    
+    return ConfiguracoesIntegracoesRead(
+        webhook_url=integracoes.get("webhook_url"),
+        webhook_secret_configurado=bool(integracoes.get("webhook_secret")),
+        api_folha_ativa=bool(integracoes.get("api_folha_ativa", False)),
+        api_folha_url=integracoes.get("api_folha_url"),
+        api_folha_token_configurado=bool(integracoes.get("api_folha_token")),
+    )
 
 
-@router.patch("/configuracoes/integracoes", response_model=ConfiguracoesIntegracoes)
+@router.patch("/configuracoes/integracoes", response_model=ConfiguracoesIntegracoesRead)
 async def update_configuracoes_integracoes(
-    data: ConfiguracoesIntegracoes,
+    data: ConfiguracoesIntegracoesUpdate,
     current_user: RequireAdmin,
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Atualizar configurações de integrações."""
+    """Atualizar configurações de integrações (preservando segredos existentes)."""
     result = await db.execute(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
@@ -387,16 +512,33 @@ async def update_configuracoes_integracoes(
     if not tenant_obj:
         raise HTTPException(status_code=404, detail="Tenant não encontrado")
     
-    tenant_obj.config = update_config_section(
-        tenant_obj.config or {}, 
-        "integracoes", 
-        data.model_dump()
-    )
+    config = normalize_tenant_config(tenant_obj.config or {})
+    integracoes = dict(config.get("integracoes", {}))
+    
+    if data.webhook_url is not None:
+        integracoes["webhook_url"] = data.webhook_url
+    if data.webhook_secret is not None and data.webhook_secret != "":
+        integracoes["webhook_secret"] = data.webhook_secret
+    if data.api_folha_ativa is not None:
+        integracoes["api_folha_ativa"] = data.api_folha_ativa
+    if data.api_folha_url is not None:
+        integracoes["api_folha_url"] = data.api_folha_url
+    if data.api_folha_token is not None and data.api_folha_token != "":
+        integracoes["api_folha_token"] = data.api_folha_token
+        
+    config["integracoes"] = integracoes
+    tenant_obj.config = config
     
     await db.commit()
     await db.refresh(tenant_obj)
     
-    return data
+    return ConfiguracoesIntegracoesRead(
+        webhook_url=integracoes.get("webhook_url"),
+        webhook_secret_configurado=bool(integracoes.get("webhook_secret")),
+        api_folha_ativa=bool(integracoes.get("api_folha_ativa", False)),
+        api_folha_url=integracoes.get("api_folha_url"),
+        api_folha_token_configurado=bool(integracoes.get("api_folha_token")),
+    )
 
 
 @router.post("/configuracoes/integracoes/testar-webhook")
@@ -405,7 +547,7 @@ async def testar_webhook(
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Testar configuração de webhook."""
+    """Testar configuração de webhook de forma segura contra SSRF."""
     import httpx
     
     result = await db.execute(
@@ -424,15 +566,21 @@ async def testar_webhook(
         return {"sucesso": False, "mensagem": "URL do webhook não configurada"}
     
     try:
-        async with httpx.AsyncClient() as client:
+        validate_webhook_url(webhook_url)
+    except ValueError as val_err:
+        logger.warning(f"Teste de webhook bloqueado por validação de segurança: {str(val_err)}")
+        return {"sucesso": False, "mensagem": "URL de webhook inválida ou não permitida"}
+    
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=5.0) as client:
             response = await client.post(
                 webhook_url,
                 json={"evento": "teste", "tenant_id": str(tenant.tenant_id)},
-                timeout=10.0,
             )
             if response.is_success:
                 return {"sucesso": True, "mensagem": f"Webhook respondeu com status {response.status_code}"}
             else:
                 return {"sucesso": False, "mensagem": f"Webhook retornou status {response.status_code}"}
     except Exception as e:
-        return {"sucesso": False, "mensagem": f"Erro ao conectar: {str(e)}"}
+        logger.error(f"Erro ao disparar webhook de teste: {type(e).__name__}")
+        return {"sucesso": False, "mensagem": "Falha ao conectar com o webhook"}
