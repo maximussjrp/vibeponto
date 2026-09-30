@@ -14,7 +14,9 @@ from app.core.security import hash_password
 from app.models import Documento, DocumentoTipo, Tenant, UserRole, UserStatus, Usuario
 from app.services.storage import StorageService
 
-TEST_DATABASE_URL = "postgresql+asyncpg://test:test@localhost:55432/hardening_r2"
+import os
+
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:54399/test_vibeponto")
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 

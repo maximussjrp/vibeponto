@@ -5,11 +5,13 @@ Tests for Micro-Sprint 01A.2 Tenant & Security Hardening
 
 import os
 import json
+import asyncio
 import importlib.util
 import pytest
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import create_async_engine
 import httpx
 
 from app.api.routes.tenant import (
@@ -43,10 +45,10 @@ def test_tenant_read_does_not_expose_raw_config_or_secrets():
         "plano": "professional",
         "ativo": True,
     }
-    
+
     tenant_read = TenantRead(**raw_tenant)
     dump = tenant_read.model_dump()
-    
+
     assert dump["id"] == tenant_id
     assert dump["nome"] == "Empresa Teste LTDA"
     assert dump["razao_social"] == "Empresa Teste Serviços LTDA"
@@ -64,7 +66,7 @@ def test_integration_secrets_are_write_only_in_schema():
         api_folha_token_configurado=True,
     )
     dump = read_schema.model_dump()
-    
+
     assert dump["webhook_secret_configurado"] is True
     assert dump["api_folha_token_configurado"] is True
     assert "webhook_secret" not in dump
@@ -88,8 +90,10 @@ def test_ssrf_webhook_validation_comprehensive():
         "https://admin:pass@example.com/webhook",
         "https://example.com@127.0.0.1/webhook",
         "https://127.0.0.1@example.com/webhook",
+        "https://100.64.0.1/webhook",
+        "http://100.64.0.1/webhook",
     ]
-    
+
     for url in forbidden_urls:
         with pytest.raises(ValueError):
             validate_webhook_url(url, allow_http=True)
@@ -171,145 +175,126 @@ def test_normalize_tenant_config_preserves_and_migrates():
     assert "integracoes" in normalized
 
 
-def test_tenant_config_alembic_migration_real_postgres():
+@pytest.mark.anyio
+async def test_tenant_config_alembic_migration_real_postgres(monkeypatch):
     """
-    Execute real Alembic migration 20260930_0002 upgrade against real PostgreSQL engine (or SQLite fallback)
+    Execute real Alembic migration 20260930_0002 upgrade against real PostgreSQL engine
     verifying Scenarios A, B, and C.
     """
     from alembic.config import Config
     from alembic import command
+    import app.core.config as config_module
 
     pg_url = os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:54399/test_vibeponto")
+    monkeypatch.setattr(config_module.settings, "database_url", pg_url)
+    os.environ["DATABASE_URL"] = pg_url
+    engine = create_async_engine(pg_url)
 
-    # Try PostgreSQL first
     try:
-        engine = sa.create_engine(pg_url.replace("+asyncpg", ""))
-        with engine.connect() as conn:
-            conn.execute(sa.text("SELECT 1"))
-        is_postgres = True
-    except Exception:
-        engine = sa.create_engine("sqlite:///:memory:")
-        is_postgres = False
+        async with engine.connect() as conn:
+            await conn.execute(sa.text("SELECT 1"))
+    except Exception as e:
+        pytest.fail(f"PostgreSQL integration required for test_tenant_config_alembic_migration_real_postgres but failed to connect to {pg_url}: {e}")
 
-    if is_postgres:
-        alembic_cfg = Config("alembic.ini")
-        os.environ["DATABASE_URL"] = pg_url
-        alembic_cfg.set_main_option("sqlalchemy.url", pg_url)
+    print("POSTGRESQL INTEGRATION PATH USED: YES")
+    os.environ["DATABASE_URL"] = pg_url
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", pg_url)
 
-        # Scenario A: Revision 20260917_0001 -> Upgrade Head
-        with engine.begin() as conn:
-            conn.execute(sa.text("DROP TABLE IF EXISTS marcacoes_ponto CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS usuarios CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS equipes CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS tenants CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE;"))
+    def run_alembic_upgrade(target):
+        command.upgrade(alembic_cfg, target)
 
-        command.upgrade(alembic_cfg, "20260917_0001")
-        command.upgrade(alembic_cfg, "head")
+    # Scenario A: Revision 20260917_0001 -> Upgrade Head
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("DROP TABLE IF EXISTS marcacoes_ponto CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS usuarios CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS equipes CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS tenants CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE;"))
 
-        with engine.connect() as conn:
-            res = conn.execute(sa.text("SELECT column_name FROM information_schema.columns WHERE table_name='tenants';"))
-            cols = [r[0] for r in res.fetchall()]
-            assert "razao_social" in cols
+    await asyncio.to_thread(run_alembic_upgrade, "20260917_0001")
+    await asyncio.to_thread(run_alembic_upgrade, "head")
 
-        # Scenario B: Legacy Tenant
-        with engine.begin() as conn:
-            conn.execute(sa.text("DROP TABLE IF EXISTS marcacoes_ponto CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS usuarios CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS equipes CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS tenants CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE;"))
+    async with engine.connect() as conn:
+        res = await conn.execute(sa.text("SELECT column_name FROM information_schema.columns WHERE table_name='tenants';"))
+        cols = [r[0] for r in res.fetchall()]
+        assert "razao_social" in cols
 
-        command.upgrade(alembic_cfg, "20260917_0001")
-        tenant_b_id = str(uuid4())
-        legacy_cfg = {
-            "slug": "empresa-legada",
-            "plano": "enterprise",
-            "jornada_diaria": 8,
-            "tolerancia_minutos": 15,
-            "custom_key": "custom_val"
-        }
+    # Scenario B: Legacy Tenant
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("DROP TABLE IF EXISTS marcacoes_ponto CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS usuarios CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS equipes CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS tenants CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE;"))
 
-        with engine.begin() as conn:
-            conn.execute(
-                sa.text("INSERT INTO tenants (id, nome, cnpj, email, config, ativo) VALUES (:id, 'Legada', '12345678000199', 'admin@legada.com', CAST(:config AS jsonb), true)"),
-                {"id": tenant_b_id, "config": json.dumps(legacy_cfg)}
-            )
+    await asyncio.to_thread(run_alembic_upgrade, "20260917_0001")
+    tenant_b_id = str(uuid4())
+    legacy_cfg = {
+        "slug": "empresa-legada",
+        "plano": "enterprise",
+        "jornada_diaria": 8,
+        "tolerancia_minutos": 15,
+        "custom_key": "custom_val"
+    }
 
-        command.upgrade(alembic_cfg, "head")
+    async with engine.begin() as conn:
+        await conn.execute(
+            sa.text("INSERT INTO tenants (id, nome, cnpj, email, config, ativo) VALUES (:id, 'Legada', '12345678000199', 'admin@legada.com', CAST(:config AS jsonb), true)"),
+            {"id": tenant_b_id, "config": json.dumps(legacy_cfg)}
+        )
 
-        with engine.connect() as conn:
-            res = conn.execute(sa.text("SELECT config FROM tenants WHERE id = :id"), {"id": tenant_b_id})
-            row = res.fetchone()
-            cfg_b = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-            assert cfg_b["slug"] == "empresa-legada"
-            assert cfg_b["plano"] == "enterprise"
-            assert cfg_b["custom_key"] == "custom_val"
-            assert cfg_b["ponto"]["jornada_diaria"] == 8
+    await asyncio.to_thread(run_alembic_upgrade, "head")
 
-        # Scenario C: Already Normalized Tenant
-        with engine.begin() as conn:
-            conn.execute(sa.text("DROP TABLE IF EXISTS marcacoes_ponto CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS usuarios CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS equipes CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS tenants CASCADE;"))
-            conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE;"))
+    async with engine.connect() as conn:
+        res = await conn.execute(sa.text("SELECT config FROM tenants WHERE id = :id"), {"id": tenant_b_id})
+        row = res.fetchone()
+        cfg_b = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        assert cfg_b["slug"] == "empresa-legada"
+        assert cfg_b["plano"] == "enterprise"
+        assert cfg_b["custom_key"] == "custom_val"
+        assert cfg_b["ponto"]["jornada_diaria"] == 8
 
-        command.upgrade(alembic_cfg, "20260917_0001")
-        tenant_c_id = str(uuid4())
-        norm_cfg = {
-            "slug": "empresa-norm",
-            "plano": "pro",
-            "ponto": {"jornada_diaria": 8}
-        }
+    # Scenario C: Already Normalized Tenant
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("DROP TABLE IF EXISTS marcacoes_ponto CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS usuarios CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS equipes CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS tenants CASCADE;"))
+        await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE;"))
 
-        with engine.begin() as conn:
-            conn.execute(
-                sa.text("INSERT INTO tenants (id, nome, cnpj, email, config, ativo) VALUES (:id, 'Norm', '98765432000188', 'admin@norm.com', CAST(:config AS jsonb), true)"),
-                {"id": tenant_c_id, "config": json.dumps(norm_cfg)}
-            )
+    await asyncio.to_thread(run_alembic_upgrade, "20260917_0001")
+    tenant_c_id = str(uuid4())
+    norm_cfg = {
+        "slug": "empresa-norm",
+        "plano": "pro",
+        "ponto": {"jornada_diaria": 8}
+    }
 
-        command.upgrade(alembic_cfg, "head")
+    async with engine.begin() as conn:
+        await conn.execute(
+            sa.text("INSERT INTO tenants (id, nome, cnpj, email, config, ativo) VALUES (:id, 'Norm', '98765432000188', 'admin@norm.com', CAST(:config AS jsonb), true)"),
+            {"id": tenant_c_id, "config": json.dumps(norm_cfg)}
+        )
 
-        with engine.connect() as conn:
-            res = conn.execute(sa.text("SELECT config FROM tenants WHERE id = :id"), {"id": tenant_c_id})
-            row = res.fetchone()
-            cfg_c = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-            assert cfg_c["slug"] == "empresa-norm"
-            assert cfg_c["ponto"]["jornada_diaria"] == 8
-    else:
-        # Memory fallback test
-        spec = importlib.util.spec_from_file_location("mig_20260930_0002", "alembic/versions/20260930_0002_normalize_tenant_schema_and_config.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        with engine.begin() as conn:
-            conn.execute(sa.text("CREATE TABLE tenants (id VARCHAR(36) PRIMARY KEY, nome VARCHAR(255), cnpj VARCHAR(18), email VARCHAR(255), config JSON, ativo BOOLEAN)"))
-            conn.execute(sa.text("INSERT INTO tenants (id, nome, cnpj, email, config) VALUES ('t-b', 'L', '123', 'a@l.com', :cfg)"), {"cfg": json.dumps({"slug": "legacy-slug", "jornada_diaria": 8})})
+    await asyncio.to_thread(run_alembic_upgrade, "head")
 
-        class MockOp:
-            def __init__(self, conn): self.conn = conn
-            def get_bind(self): return self.conn
-            def add_column(self, table, col):
-                c_type = col.type.compile(dialect=self.conn.dialect)
-                self.conn.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {col.name} {c_type}"))
+    async with engine.connect() as conn:
+        res = await conn.execute(sa.text("SELECT config FROM tenants WHERE id = :id"), {"id": tenant_c_id})
+        row = res.fetchone()
+        cfg_c = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        assert cfg_c["slug"] == "empresa-norm"
+        assert cfg_c["ponto"]["jornada_diaria"] == 8
 
-        with engine.begin() as conn:
-            mock_op = MockOp(conn)
-            mod.op = mock_op
-            mod.upgrade()
+    await engine.dispose()
 
-        with engine.connect() as conn:
-            row = conn.execute(sa.text("SELECT config FROM tenants WHERE id = 't-b'")).fetchone()
-            cfg = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-            assert cfg["slug"] == "legacy-slug"
-            assert cfg["ponto"]["jornada_diaria"] == 8
 
 
 def test_structured_address_parsing():
     # Test text parsing
     addr_str = parse_endereco_dict("Rua das Flores, 100")
     assert addr_str["logradouro"] == "Rua das Flores, 100"
-    
+
     # Test dictionary with legacy alias (cidade / estado)
     addr_dict = parse_endereco_dict({
         "logradouro": "Av Paulista",
@@ -318,7 +303,7 @@ def test_structured_address_parsing():
         "estado": "SP",
         "cep": "01310-100"
     })
-    
+
     schema = EnderecoSchema(**addr_dict)
     assert schema.logradouro == "Av Paulista"
     assert schema.municipio == "São Paulo"
@@ -329,13 +314,13 @@ def test_structured_address_parsing():
 def test_openapi_schema_contracts_no_secrets():
     """Verify OpenAPI schema contracts to ensure secrets are never exposed in GET responses."""
     openapi = app.openapi()
-    
+
     # 1. GET /tenant response schema properties
     tenant_get_props = openapi["components"]["schemas"]["TenantRead"]["properties"]
     assert "config" not in tenant_get_props
     assert "webhook_secret" not in tenant_get_props
     assert "api_folha_token" not in tenant_get_props
-    
+
     # 2. GET /configuracoes/integracoes response schema properties
     integracoes_get_props = openapi["components"]["schemas"]["ConfiguracoesIntegracoesRead"]["properties"]
     assert "webhook_secret" not in integracoes_get_props

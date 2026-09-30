@@ -20,6 +20,7 @@ FORBIDDEN_NETWORKS = [
     ipaddress.ip_network("169.254.0.0/16"),    # Link-local / AWS Metadata (169.254.169.254)
     ipaddress.ip_network("172.16.0.0/12"),     # RFC 1918 Private
     ipaddress.ip_network("192.168.0.0/16"),    # RFC 1918 Private
+    ipaddress.ip_network("100.64.0.0/10"),     # RFC 6598 Carrier-Grade NAT (CGNAT)
     ipaddress.ip_network("224.0.0.0/4"),       # Multicast
     ipaddress.ip_network("240.0.0.0/4"),       # Reserved
     ipaddress.ip_network("::/128"),            # Unspecified IPv6
