@@ -271,7 +271,13 @@ export default function EmpresaPage() {
   };
 
   const onSubmitPonto = (data: PontoForm) => updatePontoMutation.mutate(data);
-  const onSubmitNotificacoes = (data: NotificacoesForm) => updateNotificacoesMutation.mutate(data);
+  const onSubmitNotificacoes = (data: NotificacoesForm) => {
+    updateNotificacoesMutation.mutate({
+      ...data,
+      horario_lembrete_entrada: data.horario_lembrete_entrada || null,
+      horario_lembrete_saida: data.horario_lembrete_saida || null,
+    });
+  };
 
   const onSubmitSeguranca = (data: SegurancaForm) => {
     const ipsList = data.ips_permitidos

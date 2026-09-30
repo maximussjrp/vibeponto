@@ -65,8 +65,8 @@ export interface ConfiguracoesNotificacoes {
   notificar_aprovacao: boolean;
   notificar_documento: boolean;
   notificar_alerta: boolean;
-  horario_lembrete_entrada?: string;
-  horario_lembrete_saida?: string;
+  horario_lembrete_entrada?: string | null;
+  horario_lembrete_saida?: string | null;
 }
 
 export interface ConfiguracoesSeguranca {
