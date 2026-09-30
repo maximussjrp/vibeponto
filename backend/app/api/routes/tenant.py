@@ -159,7 +159,7 @@ def normalize_tenant_config(config: Optional[dict]) -> dict:
     """Normalizar a estrutura do objeto JSON config do tenant."""
     if config is None:
         config = {}
-    
+
     cfg = dict(config)
     ponto = dict(cfg.get("ponto") or {})
     notificacoes = dict(cfg.get("notificacoes") or {})
@@ -216,13 +216,13 @@ async def get_tenant(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     if not tenant_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Tenant não encontrado",
         )
-    
+
     config = tenant_obj.config or {}
     slug = config.get("slug")
     plano = config.get("plano")
@@ -254,13 +254,13 @@ async def update_tenant(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     if not tenant_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Tenant não encontrado",
         )
-    
+
     update_data = data.model_dump(exclude_unset=True)
     if "endereco" in update_data and update_data["endereco"] is not None:
         update_data["endereco"] = parse_endereco_dict(update_data["endereco"])
@@ -268,10 +268,10 @@ async def update_tenant(
     for field, value in update_data.items():
         if hasattr(tenant_obj, field):
             setattr(tenant_obj, field, value)
-    
+
     await db.commit()
     await db.refresh(tenant_obj)
-    
+
     config = tenant_obj.config or {}
     slug = config.get("slug")
     plano = config.get("plano")
@@ -299,12 +299,12 @@ async def get_estatisticas(
 ):
     """Buscar estatísticas corporativas do tenant."""
     from datetime import date
-    
+
     # Total usuários
     total_usuarios = await db.execute(
         select(func.count(Usuario.id)).where(Usuario.tenant_id == tenant.tenant_id)
     )
-    
+
     # Usuários ativos (correção para UserStatus.ACTIVE / "active")
     usuarios_ativos = await db.execute(
         select(func.count(Usuario.id)).where(
@@ -312,12 +312,12 @@ async def get_estatisticas(
             Usuario.status == UserStatus.ACTIVE,
         )
     )
-    
+
     # Total equipes
     total_equipes = await db.execute(
         select(func.count(Equipe.id)).where(Equipe.tenant_id == tenant.tenant_id)
     )
-    
+
     # Marcações hoje
     hoje = date.today()
     marcacoes_hoje = await db.execute(
@@ -326,7 +326,7 @@ async def get_estatisticas(
             func.date(MarcacaoPonto.timestamp_servidor) == hoje,
         )
     )
-    
+
     return TenantEstatisticas(
         total_usuarios=total_usuarios.scalar_one() or 0,
         usuarios_ativos=usuarios_ativos.scalar_one() or 0,
@@ -351,7 +351,7 @@ async def get_configuracoes_ponto(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     config = tenant_obj.config or {} if tenant_obj else {}
     return ConfiguracoesPonto(**get_config_section(config, "ponto", ConfiguracoesPonto))
 
@@ -368,19 +368,19 @@ async def update_configuracoes_ponto(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     if not tenant_obj:
         raise HTTPException(status_code=404, detail="Tenant não encontrado")
-    
+
     tenant_obj.config = update_config_section(
-        tenant_obj.config or {}, 
-        "ponto", 
+        tenant_obj.config or {},
+        "ponto",
         data.model_dump()
     )
-    
+
     await db.commit()
     await db.refresh(tenant_obj)
-    
+
     return data
 
 
@@ -395,7 +395,7 @@ async def get_configuracoes_notificacoes(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     config = tenant_obj.config or {} if tenant_obj else {}
     return ConfiguracoesNotificacoes(**get_config_section(config, "notificacoes", ConfiguracoesNotificacoes))
 
@@ -412,19 +412,19 @@ async def update_configuracoes_notificacoes(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     if not tenant_obj:
         raise HTTPException(status_code=404, detail="Tenant não encontrado")
-    
+
     tenant_obj.config = update_config_section(
-        tenant_obj.config or {}, 
-        "notificacoes", 
+        tenant_obj.config or {},
+        "notificacoes",
         data.model_dump()
     )
-    
+
     await db.commit()
     await db.refresh(tenant_obj)
-    
+
     return data
 
 
@@ -439,7 +439,7 @@ async def get_configuracoes_seguranca(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     config = tenant_obj.config or {} if tenant_obj else {}
     return ConfiguracoesSeguranca(**get_config_section(config, "seguranca", ConfiguracoesSeguranca))
 
@@ -456,19 +456,19 @@ async def update_configuracoes_seguranca(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     if not tenant_obj:
         raise HTTPException(status_code=404, detail="Tenant não encontrado")
-    
+
     tenant_obj.config = update_config_section(
-        tenant_obj.config or {}, 
-        "seguranca", 
+        tenant_obj.config or {},
+        "seguranca",
         data.model_dump()
     )
-    
+
     await db.commit()
     await db.refresh(tenant_obj)
-    
+
     return data
 
 
@@ -483,10 +483,10 @@ async def get_configuracoes_integracoes(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     config = tenant_obj.config or {} if tenant_obj else {}
     integracoes = config.get("integracoes", {})
-    
+
     return ConfiguracoesIntegracoesRead(
         webhook_url=integracoes.get("webhook_url"),
         webhook_secret_configurado=bool(integracoes.get("webhook_secret")),
@@ -508,13 +508,13 @@ async def update_configuracoes_integracoes(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     if not tenant_obj:
         raise HTTPException(status_code=404, detail="Tenant não encontrado")
-    
+
     config = normalize_tenant_config(tenant_obj.config or {})
     integracoes = dict(config.get("integracoes", {}))
-    
+
     if data.webhook_url is not None:
         integracoes["webhook_url"] = data.webhook_url
     if data.webhook_secret is not None and data.webhook_secret != "":
@@ -525,13 +525,13 @@ async def update_configuracoes_integracoes(
         integracoes["api_folha_url"] = data.api_folha_url
     if data.api_folha_token is not None and data.api_folha_token != "":
         integracoes["api_folha_token"] = data.api_folha_token
-        
+
     config["integracoes"] = integracoes
     tenant_obj.config = config
-    
+
     await db.commit()
     await db.refresh(tenant_obj)
-    
+
     return ConfiguracoesIntegracoesRead(
         webhook_url=integracoes.get("webhook_url"),
         webhook_secret_configurado=bool(integracoes.get("webhook_secret")),
@@ -549,38 +549,51 @@ async def testar_webhook(
 ):
     """Testar configuração de webhook de forma segura contra SSRF."""
     import httpx
-    
+
     result = await db.execute(
         select(Tenant).where(Tenant.id == tenant.tenant_id)
     )
     tenant_obj = result.scalar_one_or_none()
-    
+
     if not tenant_obj:
         raise HTTPException(status_code=404, detail="Tenant não encontrado")
-    
+
     config = tenant_obj.config or {}
     integracoes = config.get("integracoes", {})
     webhook_url = integracoes.get("webhook_url")
-    
+
     if not webhook_url:
         return {"sucesso": False, "mensagem": "URL do webhook não configurada"}
-    
+
     try:
         validate_webhook_url(webhook_url)
     except ValueError as val_err:
         logger.warning(f"Teste de webhook bloqueado por validação de segurança: {str(val_err)}")
         return {"sucesso": False, "mensagem": "URL de webhook inválida ou não permitida"}
-    
+
     try:
         async with httpx.AsyncClient(follow_redirects=False, timeout=5.0) as client:
-            response = await client.post(
+            async with client.stream(
+                "POST",
                 webhook_url,
                 json={"evento": "teste", "tenant_id": str(tenant.tenant_id)},
-            )
-            if response.is_success:
-                return {"sucesso": True, "mensagem": f"Webhook respondeu com status {response.status_code}"}
-            else:
-                return {"sucesso": False, "mensagem": f"Webhook retornou status {response.status_code}"}
+            ) as response:
+                status_code = response.status_code
+
+                content_length = response.headers.get("content-length")
+                if content_length and content_length.isdigit() and int(content_length) > 10240:
+                    return {"sucesso": False, "mensagem": "Resposta do webhook excede o tamanho limite permitido"}
+
+                total_bytes = 0
+                async for chunk in response.aiter_bytes():
+                    total_bytes += len(chunk)
+                    if total_bytes > 10240:
+                        return {"sucesso": False, "mensagem": "Resposta do webhook excede o tamanho limite permitido"}
+
+                if response.is_success:
+                    return {"sucesso": True, "mensagem": f"Webhook respondeu com status {status_code}"}
+                else:
+                    return {"sucesso": False, "mensagem": f"Webhook retornou status {status_code}"}
     except Exception as e:
         logger.error(f"Erro ao disparar webhook de teste: {type(e).__name__}")
         return {"sucesso": False, "mensagem": "Falha ao conectar com o webhook"}

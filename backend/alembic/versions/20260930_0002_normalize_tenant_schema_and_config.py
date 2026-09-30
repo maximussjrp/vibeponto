@@ -53,14 +53,14 @@ def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     columns = [c["name"] for c in inspector.get_columns("tenants")]
-    
+
     if "razao_social" not in columns:
         op.add_column("tenants", sa.Column("razao_social", sa.String(255), nullable=True))
 
     # 2. Normalize configs for existing tenants
     connection = op.get_bind()
     results = connection.execute(sa.text("SELECT id, config FROM tenants")).fetchall()
-    
+
     for row in results:
         tenant_id, cfg = row[0], row[1]
         if isinstance(cfg, str):
@@ -68,7 +68,7 @@ def upgrade() -> None:
                 cfg = json.loads(cfg)
             except Exception:
                 cfg = {}
-        
+
         normalized = normalize_config(cfg or {})
         connection.execute(
             sa.text("UPDATE tenants SET config = :config WHERE id = :id"),
@@ -80,6 +80,6 @@ def downgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     columns = [c["name"] for c in inspector.get_columns("tenants")]
-    
+
     if "razao_social" in columns:
         op.drop_column("tenants", "razao_social")
