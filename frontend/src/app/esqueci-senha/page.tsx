@@ -41,7 +41,7 @@ export default function EsqueciSenhaPage() {
   const onSubmit = async (data: EmailForm) => {
     setIsLoading(true);
     try {
-      await api.post("/auth/esqueci-senha", data);
+      await api.post("/auth/password/reset", data);
       setIsSubmitted(true);
     } catch (error) {
       // Mesmo em caso de erro, mostrar sucesso por segurança

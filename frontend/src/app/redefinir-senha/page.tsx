@@ -59,24 +59,12 @@ function RedefinirSenhaContent() {
 
   const novaSenha = watch("nova_senha", "");
 
-  // Validar token
   useEffect(() => {
-    const validateToken = async () => {
-      if (!token) {
-        setIsValidToken(false);
-        return;
-      }
-
-      try {
-        // Em produção, validar o token com a API
-        await new Promise(resolve => setTimeout(resolve, 500));
-        setIsValidToken(true);
-      } catch {
-        setIsValidToken(false);
-      }
-    };
-
-    validateToken();
+    if (!token) {
+      setIsValidToken(false);
+    } else {
+      setIsValidToken(true);
+    }
   }, [token]);
 
   const onSubmit = async (data: SenhaForm) => {
@@ -84,9 +72,10 @@ function RedefinirSenhaContent() {
 
     setIsLoading(true);
     try {
-      await api.post("/auth/redefinir-senha", {
+      await api.post("/auth/password/reset/confirm", {
         token,
-        nova_senha: data.nova_senha,
+        new_password: data.nova_senha,
+        confirm_password: data.confirmar_senha,
       });
       setIsSuccess(true);
       toast.success("Senha redefinida com sucesso!");

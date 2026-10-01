@@ -135,11 +135,12 @@ export default function PerfilPage() {
                 <Button
                   size="icon"
                   variant="outline"
-                  className="absolute bottom-0 right-0 rounded-full"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploadingPhoto}
+                  className="absolute bottom-0 right-0 rounded-full cursor-not-allowed opacity-60"
+                  onClick={() => toast.error("Upload de foto estará disponível em breve.")}
+                  disabled={true}
+                  title="Upload de foto estará disponível em breve"
                 >
-                  {uploadingPhoto ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+                  <Camera className="h-4 w-4" />
                 </Button>
                 <input
                   ref={fileInputRef}
@@ -147,6 +148,7 @@ export default function PerfilPage() {
                   accept="image/*"
                   onChange={handlePhotoUpload}
                   className="hidden"
+                  disabled={true}
                 />
               </div>
             )}
@@ -187,9 +189,9 @@ export default function PerfilPage() {
                   <div className="space-y-2">
                     <Label className="flex items-center gap-2">
                       <Mail className="h-4 w-4" />
-                      Email
+                      Email (Somente leitura)
                     </Label>
-                    <Input {...perfilForm.register("email")} type="email" />
+                    <Input {...perfilForm.register("email")} type="email" disabled className="bg-muted cursor-not-allowed" />
                     {perfilForm.formState.errors.email && (
                       <p className="text-sm text-destructive">{perfilForm.formState.errors.email.message}</p>
                     )}

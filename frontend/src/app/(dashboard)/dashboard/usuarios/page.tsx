@@ -83,18 +83,29 @@ import {
   PaginationPrevious,
 } from "@/components/ui/pagination";
 
-const usuarioSchema = z.object({
+const usuarioCreateSchema = z.object({
   nome: z.string().min(3, "Nome deve ter pelo menos 3 caracteres"),
   email: z.string().email("Email inválido"),
   cpf: z.string().min(11, "CPF inválido").max(14),
   matricula: z.string().min(1, "Matrícula é obrigatória"),
   telefone: z.string().optional(),
-  password: z.string().min(6, "Senha deve ter pelo menos 6 caracteres").optional(),
+  password: z.string().min(8, "Senha deve ter pelo menos 8 caracteres"),
   papel: z.enum(["admin_dp", "gestor", "colaborador", "auditor", "financeiro"]),
   equipe_id: z.string().optional(),
 });
 
-type UsuarioForm = z.infer<typeof usuarioSchema>;
+const usuarioUpdateSchema = z.object({
+  nome: z.string().min(3, "Nome deve ter pelo menos 3 caracteres"),
+  email: z.string().email("Email inválido").optional(),
+  cpf: z.string().optional(),
+  matricula: z.string().optional(),
+  telefone: z.string().optional(),
+  password: z.string().optional(),
+  papel: z.enum(["admin_dp", "gestor", "colaborador", "auditor", "financeiro"]).optional(),
+  equipe_id: z.string().optional(),
+});
+
+type UsuarioForm = z.infer<typeof usuarioCreateSchema>;
 
 const PAPEIS = {
   admin_dp: { label: "Admin DP", variant: "default" as const },
@@ -108,6 +119,7 @@ const STATUS = {
   active: { label: "Ativo", variant: "success" as const },
   inactive: { label: "Inativo", variant: "secondary" as const },
   suspended: { label: "Suspenso", variant: "destructive" as const },
+  pending: { label: "Pendente", variant: "secondary" as const },
 };
 
 export default function UsuariosPage() {
@@ -155,7 +167,7 @@ export default function UsuariosPage() {
     watch,
     formState: { errors },
   } = useForm<UsuarioForm>({
-    resolver: zodResolver(usuarioSchema),
+    resolver: zodResolver(editingUser ? usuarioUpdateSchema : usuarioCreateSchema),
     defaultValues: { papel: "colaborador" },
   });
 
