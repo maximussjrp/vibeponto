@@ -23,7 +23,10 @@ from app.schemas import (
     SuccessResponse,
     UsuarioCreate,
     UsuarioMinimal,
+    UsuarioMinimalColaborador,
     UsuarioRead,
+    UsuarioReadGestor,
+    UsuarioReadAuditor,
     UsuarioUpdate,
 )
 
@@ -31,7 +34,7 @@ from app.schemas import (
 router = APIRouter(prefix="/usuarios", tags=["Usuários"])
 
 
-@router.get("", response_model=PaginatedResponse[UsuarioMinimal])
+@router.get("")
 async def list_usuarios(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
@@ -103,8 +106,13 @@ async def list_usuarios(
     result = await db.execute(query)
     usuarios = result.scalars().all()
     
+    if current_user.papel == UserRole.COLABORADOR:
+        items = [UsuarioMinimalColaborador.model_validate(u) for u in usuarios]
+    else:
+        items = [UsuarioMinimal.model_validate(u) for u in usuarios]
+
     return PaginatedResponse.create(
-        items=[UsuarioMinimal.model_validate(u) for u in usuarios],
+        items=items,
         total=total,
         page=page,
         per_page=per_page,
@@ -194,7 +202,7 @@ async def create_usuario(
     return UsuarioRead.model_validate(usuario)
 
 
-@router.get("/{usuario_id}", response_model=UsuarioRead)
+@router.get("/{usuario_id}")
 async def get_usuario(
     usuario_id: UUID,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
@@ -232,6 +240,13 @@ async def get_usuario(
                     detail="Acesso negado",
                 )
     
+    if current_user.papel == UserRole.COLABORADOR:
+        return UsuarioMinimalColaborador.model_validate(usuario)
+    elif current_user.papel == UserRole.GESTOR:
+        return UsuarioReadGestor.model_validate(usuario)
+    elif current_user.papel == UserRole.AUDITOR:
+        return UsuarioReadAuditor.model_validate(usuario)
+
     return UsuarioRead.model_validate(usuario)
 
 
@@ -263,16 +278,54 @@ async def update_usuario(
             detail="Usuário não encontrado",
         )
     
-    # Gestor não pode alterar papel ou status
+    # Se for GESTOR: validar escopo de equipe de origem E equipe de destino (PLAN-03 & PLAN-08)
     if current_user.papel == UserRole.GESTOR:
         if data.papel is not None or data.status is not None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Apenas Admin pode alterar papel e status",
             )
-    
-    # Verificar equipe existe
-    if data.equipe_id:
+            
+        if usuario.equipe_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode alterar usuários de sua própria equipe",
+            )
+            
+        res_orig = await db.execute(
+            select(Equipe).where(
+                Equipe.id == usuario.equipe_id,
+                Equipe.tenant_id == tenant.tenant_id,
+            )
+        )
+        equipe_origem = res_orig.scalar_one_or_none()
+        if not equipe_origem or equipe_origem.lider_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode alterar usuários de sua própria equipe",
+            )
+            
+        if data.equipe_id is not None and data.equipe_id != usuario.equipe_id:
+            res_dest = await db.execute(
+                select(Equipe).where(
+                    Equipe.id == data.equipe_id,
+                    Equipe.tenant_id == tenant.tenant_id,
+                )
+            )
+            equipe_destino = res_dest.scalar_one_or_none()
+            if not equipe_destino:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Equipe de destino não encontrada",
+                )
+            if equipe_destino.lider_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Gestor só pode transferir usuários para equipes lideradas por ele",
+                )
+
+    # Verificar equipe existe (para admin ou gestor)
+    if data.equipe_id and current_user.papel != UserRole.GESTOR:
         result = await db.execute(
             select(Equipe).where(
                 Equipe.id == data.equipe_id,
@@ -285,6 +338,8 @@ async def update_usuario(
                 detail="Equipe não encontrada",
             )
     
+    role_changed = data.papel is not None and data.papel != usuario.papel
+
     # Atualizar campos
     update_data = data.model_dump(exclude_unset=True)
     if update_data:
@@ -295,6 +350,11 @@ async def update_usuario(
         )
         await db.commit()
         await db.refresh(usuario)
+        
+    if role_changed:
+        from app.core.redis import get_redis
+        redis = await get_redis()
+        await redis.revoke_all_user_sessions(str(usuario_id))
     
     return UsuarioRead.model_validate(usuario)
 
@@ -340,6 +400,10 @@ async def delete_usuario(
     )
     await db.commit()
     
+    from app.core.redis import get_redis
+    redis = await get_redis()
+    await redis.revoke_all_user_sessions(str(usuario_id))
+    
     return SuccessResponse(message="Usuário desativado com sucesso")
 
 
@@ -377,18 +441,14 @@ async def reactivate_usuario(
     return UsuarioRead.model_validate(usuario)
 
 
-@router.post("/{usuario_id}/reset-password", response_model=SuccessResponse)
-async def admin_reset_password(
+@router.post("/{usuario_id}/suspend", response_model=UsuarioRead)
+async def suspend_usuario(
     usuario_id: UUID,
     current_user: RequireAdmin,
     tenant: Annotated[TenantContext, Depends(get_tenant_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """
-    Reset de senha pelo admin.
-    
-    Gera senha temporária e envia por email.
-    """
+    """Suspender usuário e revogar sessões ativas (apenas Admin)."""
     result = await db.execute(
         select(Usuario).where(
             Usuario.id == usuario_id,
@@ -403,20 +463,78 @@ async def admin_reset_password(
             detail="Usuário não encontrado",
         )
     
-    # Gerar senha temporária
-    import secrets
-    temp_password = secrets.token_urlsafe(12)
+    if usuario.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Não é possível suspender seu próprio usuário",
+        )
     
     await db.execute(
         update(Usuario)
         .where(Usuario.id == usuario_id)
-        .values(password_hash=hash_password(temp_password))
+        .values(status=UserStatus.SUSPENDED)
     )
     await db.commit()
+    await db.refresh(usuario)
     
-    # TODO: Enviar email com senha temporária
-    # send_temp_password_email(usuario.email, temp_password)
+    from app.core.redis import get_redis
+    redis = await get_redis()
+    await redis.revoke_all_user_sessions(str(usuario_id))
+    
+    return UsuarioRead.model_validate(usuario)
+
+
+@router.post("/{usuario_id}/reset-password", response_model=SuccessResponse)
+async def admin_reset_password(
+    usuario_id: UUID,
+    current_user: RequireAdmin,
+    tenant: Annotated[TenantContext, Depends(get_tenant_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Reset de senha pelo admin.
+    
+    Gera token de recuperação seguro sem alterar password_hash diretamente.
+    Revoga sessões ativas do usuário.
+    """
+    import secrets
+    from app.core.email import email_service
+    from app.core.redis import get_redis
+
+    result = await db.execute(
+        select(Usuario).where(
+            Usuario.id == usuario_id,
+            Usuario.tenant_id == tenant.tenant_id,
+        )
+    )
+    usuario = result.scalar_one_or_none()
+    
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuário não encontrado",
+        )
+    
+    token = secrets.token_urlsafe(32)
+    
+    redis = await get_redis()
+    await redis.store_password_reset_token(
+        user_id=str(usuario.id),
+        token=token,
+        ttl_seconds=3600,
+    )
+    
+    await redis.revoke_all_user_sessions(str(usuario.id))
+    
+    try:
+        await email_service.send_password_reset(
+            email=usuario.email,
+            token=token,
+            nome=usuario.nome,
+        )
+    except Exception:
+        pass
     
     return SuccessResponse(
-        message="Senha resetada. O usuário receberá a nova senha por email."
+        message="Link de recuperação de senha gerado e enviado ao usuário."
     )

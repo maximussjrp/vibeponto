@@ -168,6 +168,13 @@ async def update_equipe(
             detail="Equipe não encontrada",
         )
     
+    if current_user.papel == UserRole.GESTOR:
+        if equipe.lider_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode atualizar equipes lideradas por ele",
+            )
+    
     # Verificar líder existe
     if data.lider_id:
         result = await db.execute(
@@ -258,11 +265,19 @@ async def add_membro(
             Equipe.tenant_id == tenant.tenant_id,
         )
     )
-    if not result.scalar_one_or_none():
+    equipe = result.scalar_one_or_none()
+    if not equipe:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Equipe não encontrada",
         )
+        
+    if current_user.papel == UserRole.GESTOR:
+        if equipe.lider_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode adicionar membros em equipes lideradas por ele",
+            )
     
     # Verificar usuário
     result = await db.execute(
@@ -278,6 +293,20 @@ async def add_membro(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
+        
+    if current_user.papel == UserRole.GESTOR and usuario.equipe_id is not None and usuario.equipe_id != equipe_id:
+        res_orig = await db.execute(
+            select(Equipe).where(
+                Equipe.id == usuario.equipe_id,
+                Equipe.tenant_id == tenant.tenant_id,
+            )
+        )
+        equipe_orig = res_orig.scalar_one_or_none()
+        if not equipe_orig or equipe_orig.lider_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode transferir membros de equipes lideradas por ele",
+            )
     
     # Atualizar equipe do usuário
     await db.execute(
@@ -315,6 +344,20 @@ async def remove_membro(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado nesta equipe",
         )
+        
+    if current_user.papel == UserRole.GESTOR:
+        res_eq = await db.execute(
+            select(Equipe).where(
+                Equipe.id == equipe_id,
+                Equipe.tenant_id == tenant.tenant_id,
+            )
+        )
+        eq = res_eq.scalar_one_or_none()
+        if not eq or eq.lider_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode remover membros de equipes lideradas por ele",
+            )
     
     # Remover da equipe
     await db.execute(

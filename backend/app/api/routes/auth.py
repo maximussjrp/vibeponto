@@ -47,6 +47,7 @@ from app.schemas import (
     SuccessResponse,
     TokenResponse,
     UsuarioRead,
+    UsuarioSelfUpdate,
 )
 from app.services.mfa import generate_backup_codes, replace_backup_codes, verify_mfa_code
 
@@ -203,7 +204,7 @@ async def register_tenant(
         tenant_id=tenant_id,
         nome=request.admin_nome,
         email=request.admin_email,
-        cpf="00000000000",  # CPF temporário - admin pode atualizar depois
+        cpf=None,  # CPF nulo - admin pode atualizar depois
         telefone=None,
         matricula=matricula,
         password_hash=hash_password(request.admin_senha),
@@ -306,6 +307,12 @@ async def login(
         )
 
     # Verificar status
+    if user_status == UserStatus.PENDING or user_status == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cadastro pendente de ativação.",
+        )
+
     if user_status == UserStatus.SUSPENDED or user_status == "suspended":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -708,3 +715,35 @@ async def get_current_user_info(
         )
 
     return UsuarioRead.model_validate(usuario)
+
+
+@router.patch("/me", response_model=UsuarioRead)
+async def update_current_user_info(
+    data: UsuarioSelfUpdate,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Atualizar informações do próprio usuário (auto-serviço: apenas nome e telefone)."""
+    result = await db.execute(
+        select(Usuario).where(Usuario.id == current_user.id)
+    )
+    usuario = result.scalar_one_or_none()
+
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuário não encontrado",
+        )
+
+    update_data = data.model_dump(exclude_unset=True)
+    if update_data:
+        await db.execute(
+            update(Usuario)
+            .where(Usuario.id == current_user.id)
+            .values(**update_data)
+        )
+        await db.commit()
+        await db.refresh(usuario)
+
+    return UsuarioRead.model_validate(usuario)
+
