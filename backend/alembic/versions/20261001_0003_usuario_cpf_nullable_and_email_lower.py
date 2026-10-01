@@ -53,4 +53,7 @@ def downgrade() -> None:
     dialect_name = bind.dialect.name
     if dialect_name == "postgresql":
         op.drop_index("uq_usuario_tenant_email_lower", table_name="usuarios", if_exists=True)
-    op.alter_column("usuarios", "cpf", existing_type=sa.String(14), nullable=False)
+
+    null_cpfs = bind.execute(sa.text("SELECT COUNT(*) FROM usuarios WHERE cpf IS NULL")).scalar()
+    if null_cpfs == 0:
+        op.alter_column("usuarios", "cpf", existing_type=sa.String(14), nullable=False)

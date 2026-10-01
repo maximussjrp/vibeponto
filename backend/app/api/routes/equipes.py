@@ -140,6 +140,12 @@ async def get_equipe(
             detail="Equipe não encontrada",
         )
     
+    if current_user.papel == UserRole.COLABORADOR and current_user.equipe_id != equipe_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acesso negado a membros de outras equipes",
+        )
+
     response = EquipeWithMembers.model_validate(equipe)
     if current_user.papel == UserRole.ADMIN_DP or (current_user.papel == UserRole.GESTOR and equipe.lider_id == current_user.id):
         response.membros = [UsuarioMinimal.model_validate(m) for m in equipe.membros]
@@ -289,6 +295,11 @@ async def add_membro(
         )
         
     if current_user.papel == UserRole.GESTOR:
+        if not equipe.ativa:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode gerenciar membros em equipes ativas",
+            )
         if equipe.lider_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -309,6 +320,13 @@ async def add_membro(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
+
+    if current_user.papel == UserRole.GESTOR:
+        if usuario.papel != UserRole.COLABORADOR:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode gerenciar colaboradores em equipes",
+            )
         
     if current_user.papel == UserRole.GESTOR and usuario.equipe_id is not None and usuario.equipe_id != equipe_id:
         res_orig = await db.execute(
@@ -318,10 +336,10 @@ async def add_membro(
             )
         )
         equipe_orig = res_orig.scalar_one_or_none()
-        if not equipe_orig or equipe_orig.lider_id != current_user.id:
+        if not equipe_orig or equipe_orig.lider_id != current_user.id or not equipe_orig.ativa:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Gestor só pode transferir membros de equipes lideradas por ele",
+                detail="Gestor só pode transferir membros de equipes ativas lideradas por ele",
             )
     
     # Atualizar equipe do usuário
@@ -362,6 +380,11 @@ async def remove_membro(
         )
         
     if current_user.papel == UserRole.GESTOR:
+        if usuario.papel != UserRole.COLABORADOR:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode gerenciar colaboradores em equipes",
+            )
         res_eq = await db.execute(
             select(Equipe).where(
                 Equipe.id == equipe_id,
@@ -369,10 +392,10 @@ async def remove_membro(
             )
         )
         eq = res_eq.scalar_one_or_none()
-        if not eq or eq.lider_id != current_user.id:
+        if not eq or eq.lider_id != current_user.id or not eq.ativa:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Gestor só pode remover membros de equipes lideradas por ele",
+                detail="Gestor só pode remover membros de equipes ativas lideradas por ele",
             )
     
     # Remover da equipe

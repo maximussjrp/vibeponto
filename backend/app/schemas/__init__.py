@@ -19,6 +19,7 @@ from app.schemas.auth import (
     UsuarioUpdate,
     UsuarioSelfUpdate,
     UsuarioRead,
+    UsuarioReadOperacional,
     UsuarioReadGestor,
     UsuarioReadAuditor,
     UsuarioMinimal,

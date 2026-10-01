@@ -25,6 +25,7 @@ from app.schemas import (
     UsuarioMinimal,
     UsuarioMinimalColaborador,
     UsuarioRead,
+    UsuarioReadOperacional,
     UsuarioReadGestor,
     UsuarioReadAuditor,
     UsuarioUpdate,
@@ -254,7 +255,7 @@ async def get_usuario(
     return UsuarioRead.model_validate(usuario)
 
 
-@router.patch("/{usuario_id}")
+@router.patch("/{usuario_id}", response_model=UsuarioReadOperacional)
 async def update_usuario(
     usuario_id: UUID,
     data: UsuarioUpdate,

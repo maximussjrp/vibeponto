@@ -245,8 +245,8 @@ class UsuarioMinimalColaborador(BaseSchema):
     equipe_id: Optional[UUID] = None
 
 
-class UsuarioReadGestor(BaseSchema):
-    """Schema de leitura operacional para Gestores (sem CPF, MFA, telefone, ultimo_login)."""
+class UsuarioReadOperacional(BaseSchema):
+    """Schema operacional mínimo e seguro para respostas de mutação (PATCH /usuarios/{id})."""
     
     id: UUID
     tenant_id: UUID
@@ -259,6 +259,11 @@ class UsuarioReadGestor(BaseSchema):
     equipe_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
+
+
+class UsuarioReadGestor(UsuarioReadOperacional):
+    """Schema de leitura operacional para Gestores (sem CPF, MFA, telefone, ultimo_login)."""
+    pass
 
 
 class UsuarioReadAuditor(BaseSchema):
