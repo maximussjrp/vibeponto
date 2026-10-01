@@ -8,6 +8,7 @@ import { z } from "zod";
 import toast from "react-hot-toast";
 import { getErrorMessage } from "@/lib/api";
 import { formatCPF, getInitials } from "@/lib/utils";
+import { useAuthStore } from "@/store/auth";
 import { usuariosService, equipesService } from "@/services";
 import type { Usuario, UsuarioCreate, UsuarioUpdate, ListUsuariosParams } from "@/services/usuarios";
 import { Button } from "@/components/ui/button";
@@ -110,6 +111,7 @@ const STATUS = {
 };
 
 export default function UsuariosPage() {
+  const { user } = useAuthStore();
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -213,19 +215,22 @@ export default function UsuariosPage() {
   const resetPasswordMutation = useMutation({
     mutationFn: (id: string) => usuariosService.resetPassword(id),
     onSuccess: (data) => {
-      toast.success(`Senha resetada! Nova senha: ${data.temp_password}`, { duration: 10000 });
+      toast.success(data.message || "Solicitação de reset de senha enviada com sucesso!", { duration: 5000 });
     },
     onError: (error) => toast.error(getErrorMessage(error)),
   });
 
   const onSubmit = (formData: UsuarioForm) => {
+    const isGestor = user?.papel === "gestor";
     if (editingUser) {
       const updateData: UsuarioUpdate = {
         nome: formData.nome,
         telefone: formData.telefone,
-        papel: formData.papel,
         equipe_id: formData.equipe_id || undefined,
       };
+      if (!isGestor && formData.papel) {
+        updateData.papel = formData.papel;
+      }
       updateMutation.mutate({ id: editingUser.id, data: updateData });
     } else {
       const createData: UsuarioCreate = {
@@ -242,15 +247,15 @@ export default function UsuariosPage() {
     }
   };
 
-  const handleEdit = (user: Usuario) => {
-    setEditingUser(user);
-    setValue("nome", user.nome);
-    setValue("email", user.email);
-    setValue("cpf", user.cpf);
-    setValue("matricula", user.matricula);
-    setValue("telefone", user.telefone || "");
-    setValue("papel", user.papel);
-    setValue("equipe_id", user.equipe_id || "");
+  const handleEdit = (userToEdit: Usuario) => {
+    setEditingUser(userToEdit);
+    setValue("nome", userToEdit.nome);
+    setValue("email", userToEdit.email);
+    setValue("cpf", userToEdit.cpf || "");
+    setValue("matricula", userToEdit.matricula || "");
+    setValue("telefone", userToEdit.telefone || "");
+    setValue("papel", userToEdit.papel);
+    setValue("equipe_id", userToEdit.equipe_id || "");
     setDialogOpen(true);
   };
 
