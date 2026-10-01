@@ -24,6 +24,11 @@ class LoginRequest(BaseSchema):
     device_id: Optional[str] = None
     device_info: Optional[dict] = None
 
+    @field_validator("email")
+    @classmethod
+    def normalize_login_email(cls, v: str) -> str:
+        return v.strip().lower() if v else v
+
 
 class LoginResponse(BaseSchema):
     """Response de login."""
@@ -72,12 +77,25 @@ class PasswordResetRequest(BaseSchema):
     email: EmailStr
     tenant_id: Optional[UUID] = None
 
+    @field_validator("email")
+    @classmethod
+    def normalize_reset_email(cls, v: str) -> str:
+        return v.strip().lower() if v else v
+
 
 class PasswordResetConfirm(BaseSchema):
     """Confirmação de reset de senha."""
     
     token: str
     new_password: str = Field(..., min_length=8)
+    confirm_password: str = Field(..., min_length=8)
+
+    @field_validator("confirm_password")
+    @classmethod
+    def confirm_password_matches(cls, v: str, info) -> str:
+        if "new_password" in info.data and v != info.data["new_password"]:
+            raise ValueError("As senhas não conferem")
+        return v
 
 
 # ============================================================================
@@ -109,22 +127,70 @@ class MFADisableRequest(BaseSchema):
 # USUÁRIO
 # ============================================================================
 
+def sanitize_and_validate_cpf(v: Optional[str]) -> Optional[str]:
+    """Sanitizar e validar dígitos de CPF pelo algoritmo Módulo 11."""
+    if not v:
+        return None
+    digits = [int(c) for c in v if c.isdigit()]
+    if len(digits) == 0:
+        return None
+    if len(digits) != 11:
+        raise ValueError("CPF deve conter exatamente 11 dígitos numéricos")
+    if len(set(digits)) == 1:
+        raise ValueError("CPF inválido (sequência repetida)")
+    s1 = sum(d * w for d, w in zip(digits[:9], range(10, 1, -1)))
+    r1 = (s1 * 10) % 11
+    if r1 == 10:
+        r1 = 0
+    if r1 != digits[9]:
+        raise ValueError("CPF inválido (dígito verificador incorreto)")
+    s2 = sum(d * w for d, w in zip(digits[:10], range(11, 1, -1)))
+    r2 = (s2 * 10) % 11
+    if r2 == 10:
+        r2 = 0
+    if r2 != digits[10]:
+        raise ValueError("CPF inválido (dígito verificador incorreto)")
+    return "".join(str(d) for d in digits)
+
+
 class UsuarioBase(BaseSchema):
     """Schema base de usuário."""
     
     nome: str = Field(..., min_length=2, max_length=255)
     email: EmailStr
-    cpf: str = Field(..., min_length=11, max_length=14)
+    cpf: Optional[str] = Field(None, max_length=14)
     telefone: Optional[str] = Field(None, max_length=20)
     matricula: str = Field(..., min_length=1, max_length=50)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower() if v else v
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_and_validate_cpf(v)
 
 
 class UsuarioCreate(UsuarioBase):
     """Schema para criar usuário."""
     
+    cpf: str = Field(..., min_length=11, max_length=14)
     password: str = Field(..., min_length=8)
     papel: UserRole = UserRole.COLABORADOR
     equipe_id: Optional[UUID] = None
+
+    @field_validator("cpf")
+    @classmethod
+    def validate_cpf_required(cls, v: str) -> str:
+        if not v or not str(v).strip():
+            raise ValueError("CPF é obrigatório para cadastro de usuário")
+        res = sanitize_and_validate_cpf(v)
+        if not res:
+            raise ValueError("CPF é obrigatório para cadastro de usuário")
+        return res
+
 
 
 class UsuarioUpdate(BaseSchema):
@@ -137,8 +203,15 @@ class UsuarioUpdate(BaseSchema):
     status: Optional[UserStatus] = None
 
 
+class UsuarioSelfUpdate(BaseSchema):
+    """Schema de auto-serviço (próprio colaborador)."""
+    
+    nome: Optional[str] = Field(None, min_length=2, max_length=255)
+    telefone: Optional[str] = Field(None, max_length=20)
+
+
 class UsuarioRead(UsuarioBase, TimestampSchema):
-    """Schema de leitura de usuário."""
+    """Schema de leitura administrativa completa de usuário."""
     
     id: UUID
     tenant_id: UUID
@@ -151,7 +224,7 @@ class UsuarioRead(UsuarioBase, TimestampSchema):
 
 
 class UsuarioMinimal(BaseSchema):
-    """Schema mínimo de usuário (para listas)."""
+    """Schema mínimo de usuário (para listas gerais)."""
     
     id: UUID
     nome: str
@@ -159,6 +232,48 @@ class UsuarioMinimal(BaseSchema):
     matricula: str
     papel: UserRole
     status: UserStatus
+    equipe_id: Optional[UUID] = None
+
+
+class UsuarioMinimalColaborador(BaseSchema):
+    """Schema mínimo sanitizado para colaboradores (sem PII de contato/documentos)."""
+    
+    id: UUID
+    nome: str
+    papel: UserRole
+    status: UserStatus
+    equipe_id: Optional[UUID] = None
+
+
+class UsuarioReadGestor(BaseSchema):
+    """Schema de leitura operacional para Gestores (sem CPF)."""
+    
+    id: UUID
+    tenant_id: UUID
+    nome: str
+    email: EmailStr
+    telefone: Optional[str] = None
+    matricula: str
+    papel: UserRole
+    status: UserStatus
+    mfa_enabled: bool
+    foto_base_url: Optional[str] = None
+    equipe_id: Optional[UUID] = None
+    ultimo_login: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UsuarioReadAuditor(UsuarioRead):
+    """Schema de leitura para Auditores (CPF mascarado)."""
+    
+    @field_validator("cpf")
+    @classmethod
+    def mask_cpf_for_auditor(cls, v: Optional[str]) -> Optional[str]:
+        if not v or len(v) < 11:
+            return None
+        clean = "".join(filter(str.isdigit, v))
+        return f"***.***.{clean[6:9]}-{clean[9:11]}"
 
 
 # ============================================================================
@@ -173,6 +288,11 @@ class TenantBase(BaseSchema):
     email: EmailStr
     telefone: Optional[str] = Field(None, max_length=20)
 
+    @field_validator("email")
+    @classmethod
+    def normalize_tenant_email(cls, v: str) -> str:
+        return v.strip().lower() if v else v
+
 
 class TenantCreate(TenantBase):
     """Schema para criar tenant."""
@@ -183,8 +303,18 @@ class TenantCreate(TenantBase):
     # Admin inicial
     admin_nome: str = Field(..., min_length=2, max_length=255)
     admin_email: EmailStr
-    admin_cpf: str = Field(..., min_length=11, max_length=14)
+    admin_cpf: Optional[str] = Field(None, max_length=14)
     admin_password: str = Field(..., min_length=8)
+
+    @field_validator("admin_email")
+    @classmethod
+    def normalize_admin_email(cls, v: str) -> str:
+        return v.strip().lower() if v else v
+
+    @field_validator("admin_cpf")
+    @classmethod
+    def validate_admin_cpf(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_and_validate_cpf(v)
 
 
 class TenantUpdate(BaseSchema):
@@ -195,6 +325,11 @@ class TenantUpdate(BaseSchema):
     telefone: Optional[str] = Field(None, max_length=20)
     endereco: Optional[dict] = None
     config: Optional[dict] = None
+
+    @field_validator("email")
+    @classmethod
+    def normalize_tenant_update_email(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip().lower() if v else v
 
 
 class TenantRead(TenantBase, TimestampSchema):
@@ -222,6 +357,11 @@ class RegisterTenantRequest(BaseSchema):
     
     # Plano
     plano: str = Field(default="professional")
+
+    @field_validator("empresa_email", "admin_email")
+    @classmethod
+    def normalize_reg_emails(cls, v: str) -> str:
+        return v.strip().lower() if v else v
 
 
 class RegisterTenantResponse(BaseSchema):
