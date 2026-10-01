@@ -515,11 +515,13 @@ async def request_password_reset(
                     "Password reset email delivery failed",
                     extra={"user_id": str(usuario.id)},
                 )
+                await redis.invalidate_password_reset_token(token)
         except Exception:
             logger.exception(
                 "Password reset email provider unavailable",
                 extra={"user_id": str(usuario.id)},
             )
+            await redis.invalidate_password_reset_token(token)
 
     return SuccessResponse(
         message="Se o email existir no sistema, um link de recuperação será enviado"

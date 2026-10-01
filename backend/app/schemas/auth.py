@@ -246,27 +246,36 @@ class UsuarioMinimalColaborador(BaseSchema):
 
 
 class UsuarioReadGestor(BaseSchema):
-    """Schema de leitura operacional para Gestores (sem CPF)."""
+    """Schema de leitura operacional para Gestores (sem CPF, MFA, telefone, ultimo_login)."""
     
     id: UUID
     tenant_id: UUID
     nome: str
     email: EmailStr
-    telefone: Optional[str] = None
     matricula: str
     papel: UserRole
     status: UserStatus
-    mfa_enabled: bool
     foto_base_url: Optional[str] = None
     equipe_id: Optional[UUID] = None
-    ultimo_login: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
 
-class UsuarioReadAuditor(UsuarioRead):
-    """Schema de leitura para Auditores (CPF mascarado)."""
+class UsuarioReadAuditor(BaseSchema):
+    """Schema de leitura para Auditores (CPF mascarado, sem segredos/MFA)."""
     
+    id: UUID
+    tenant_id: UUID
+    nome: str
+    email: EmailStr
+    matricula: str
+    cpf: Optional[str] = None
+    papel: UserRole
+    status: UserStatus
+    equipe_id: Optional[UUID] = None
+    created_at: datetime
+    updated_at: datetime
+
     @field_validator("cpf")
     @classmethod
     def mask_cpf_for_auditor(cls, v: Optional[str]) -> Optional[str]:
@@ -274,6 +283,15 @@ class UsuarioReadAuditor(UsuarioRead):
             return None
         clean = "".join(filter(str.isdigit, v))
         return f"***.***.{clean[6:9]}-{clean[9:11]}"
+
+
+class EquipeMembroMinimal(BaseSchema):
+    """Schema mínimo para membros de equipe (sem PII sensível)."""
+
+    id: UUID
+    nome: str
+    papel: UserRole
+    status: UserStatus
 
 
 # ============================================================================
@@ -411,10 +429,12 @@ class EquipeRead(EquipeBase, TimestampSchema):
     ativa: bool
 
 
+from typing import Union
+
 class EquipeWithMembers(EquipeRead):
     """Schema de equipe com membros."""
     
-    membros: list[UsuarioMinimal] = []
+    membros: list[Union[UsuarioMinimal, EquipeMembroMinimal, UsuarioMinimalColaborador]] = []
 
 
 # Circular import resolution

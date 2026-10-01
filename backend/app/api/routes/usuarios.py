@@ -108,8 +108,12 @@ async def list_usuarios(
     
     if current_user.papel == UserRole.COLABORADOR:
         items = [UsuarioMinimalColaborador.model_validate(u) for u in usuarios]
+    elif current_user.papel in (UserRole.GESTOR, UserRole.FINANCEIRO):
+        items = [UsuarioReadGestor.model_validate(u) for u in usuarios]
+    elif current_user.papel == UserRole.AUDITOR:
+        items = [UsuarioReadAuditor.model_validate(u) for u in usuarios]
     else:
-        items = [UsuarioMinimal.model_validate(u) for u in usuarios]
+        items = [UsuarioRead.model_validate(u) for u in usuarios]
 
     return PaginatedResponse.create(
         items=items,
@@ -242,7 +246,7 @@ async def get_usuario(
     
     if current_user.papel == UserRole.COLABORADOR:
         return UsuarioMinimalColaborador.model_validate(usuario)
-    elif current_user.papel == UserRole.GESTOR:
+    elif current_user.papel in (UserRole.GESTOR, UserRole.FINANCEIRO):
         return UsuarioReadGestor.model_validate(usuario)
     elif current_user.papel == UserRole.AUDITOR:
         return UsuarioReadAuditor.model_validate(usuario)
@@ -250,7 +254,7 @@ async def get_usuario(
     return UsuarioRead.model_validate(usuario)
 
 
-@router.patch("/{usuario_id}", response_model=UsuarioRead)
+@router.patch("/{usuario_id}")
 async def update_usuario(
     usuario_id: UUID,
     data: UsuarioUpdate,
@@ -262,7 +266,7 @@ async def update_usuario(
     Atualizar usuário.
     
     - Admin pode alterar qualquer campo
-    - Gestor pode alterar campos básicos (não papel)
+    - Gestor pode alterar apenas colaboradores de sua equipe (não papel/status)
     """
     result = await db.execute(
         select(Usuario).where(
@@ -278,8 +282,13 @@ async def update_usuario(
             detail="Usuário não encontrado",
         )
     
-    # Se for GESTOR: validar escopo de equipe de origem E equipe de destino (PLAN-03 & PLAN-08)
+    # Se for GESTOR: apenas colaboradores, validar equipe de origem E destino (atividades ativas)
     if current_user.papel == UserRole.GESTOR:
+        if usuario.papel != UserRole.COLABORADOR:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Gestor só pode editar colaboradores",
+            )
         if data.papel is not None or data.status is not None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -299,10 +308,10 @@ async def update_usuario(
             )
         )
         equipe_origem = res_orig.scalar_one_or_none()
-        if not equipe_origem or equipe_origem.lider_id != current_user.id:
+        if not equipe_origem or equipe_origem.lider_id != current_user.id or not equipe_origem.ativa:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Gestor só pode alterar usuários de sua própria equipe",
+                detail="Gestor só pode alterar usuários de sua própria equipe ativa",
             )
             
         if data.equipe_id is not None and data.equipe_id != usuario.equipe_id:
@@ -318,10 +327,10 @@ async def update_usuario(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Equipe de destino não encontrada",
                 )
-            if equipe_destino.lider_id != current_user.id:
+            if equipe_destino.lider_id != current_user.id or not equipe_destino.ativa:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Gestor só pode transferir usuários para equipes lideradas por ele",
+                    detail="Gestor só pode transferir usuários para equipes ativas lideradas por ele",
                 )
 
     # Verificar equipe existe (para admin ou gestor)
@@ -356,6 +365,13 @@ async def update_usuario(
         redis = await get_redis()
         await redis.revoke_all_user_sessions(str(usuario_id))
     
+    if current_user.papel == UserRole.COLABORADOR:
+        return UsuarioMinimalColaborador.model_validate(usuario)
+    elif current_user.papel in (UserRole.GESTOR, UserRole.FINANCEIRO):
+        return UsuarioReadGestor.model_validate(usuario)
+    elif current_user.papel == UserRole.AUDITOR:
+        return UsuarioReadAuditor.model_validate(usuario)
+
     return UsuarioRead.model_validate(usuario)
 
 
@@ -524,16 +540,26 @@ async def admin_reset_password(
         ttl_seconds=3600,
     )
     
-    await redis.revoke_all_user_sessions(str(usuario.id))
-    
     try:
-        await email_service.send_password_reset(
+        sent = await email_service.send_password_reset(
             email=usuario.email,
             token=token,
             nome=usuario.nome,
         )
+        if not sent:
+            await redis.invalidate_password_reset_token(token)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Falha ao enviar e-mail de recuperação de senha",
+            )
+    except HTTPException:
+        raise
     except Exception:
-        pass
+        await redis.invalidate_password_reset_token(token)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Serviço de e-mail indisponível para recuperação de senha",
+        )
     
     return SuccessResponse(
         message="Link de recuperação de senha gerado e enviado ao usuário."

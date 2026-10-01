@@ -23,6 +23,7 @@ from app.schemas.auth import (
     UsuarioReadAuditor,
     UsuarioMinimal,
     UsuarioMinimalColaborador,
+    EquipeMembroMinimal,
     # Tenant
     TenantBase,
     TenantCreate,

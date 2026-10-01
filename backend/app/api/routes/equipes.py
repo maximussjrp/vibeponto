@@ -17,7 +17,7 @@ from app.api.deps import (
     get_db,
     get_tenant_context,
 )
-from app.models import Equipe, Usuario, UserRole
+from app.models import Equipe, Usuario, UserRole, UserStatus
 from app.schemas import (
     EquipeCreate,
     EquipeRead,
@@ -26,6 +26,7 @@ from app.schemas import (
     PaginatedResponse,
     SuccessResponse,
     UsuarioMinimal,
+    EquipeMembroMinimal,
 )
 
 
@@ -84,7 +85,7 @@ async def create_equipe(
 ):
     """Criar nova equipe (apenas Admin)."""
     
-    # Verificar líder existe
+    # Verificar líder existe e é elegível (ativo, gestor/admin_dp, mesmo tenant)
     if data.lider_id:
         result = await db.execute(
             select(Usuario).where(
@@ -92,10 +93,11 @@ async def create_equipe(
                 Usuario.tenant_id == tenant.tenant_id,
             )
         )
-        if not result.scalar_one_or_none():
+        lider = result.scalar_one_or_none()
+        if not lider or lider.status != UserStatus.ACTIVE or lider.papel not in (UserRole.GESTOR, UserRole.ADMIN_DP):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Líder não encontrado",
+                detail="Líder inelegível ou de outro tenant",
             )
     
     equipe = Equipe(
@@ -139,7 +141,10 @@ async def get_equipe(
         )
     
     response = EquipeWithMembers.model_validate(equipe)
-    response.membros = [UsuarioMinimal.model_validate(m) for m in equipe.membros]
+    if current_user.papel == UserRole.ADMIN_DP or (current_user.papel == UserRole.GESTOR and equipe.lider_id == current_user.id):
+        response.membros = [UsuarioMinimal.model_validate(m) for m in equipe.membros]
+    else:
+        response.membros = [EquipeMembroMinimal.model_validate(m) for m in equipe.membros]
     
     return response
 
@@ -174,19 +179,30 @@ async def update_equipe(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Gestor só pode atualizar equipes lideradas por ele",
             )
+        if "lider_id" in data.model_fields_set:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Apenas Admin pode alterar a liderança da equipe",
+            )
+        if "ativa" in data.model_fields_set or "config" in data.model_fields_set:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Apenas Admin pode alterar o estado ou configurações da equipe",
+            )
     
-    # Verificar líder existe
-    if data.lider_id:
+    # Verificar líder existe e é elegível (para Admin DP alterando lider_id)
+    if "lider_id" in data.model_fields_set and data.lider_id is not None:
         result = await db.execute(
             select(Usuario).where(
                 Usuario.id == data.lider_id,
                 Usuario.tenant_id == tenant.tenant_id,
             )
         )
-        if not result.scalar_one_or_none():
+        lider = result.scalar_one_or_none()
+        if not lider or lider.status != UserStatus.ACTIVE or lider.papel not in (UserRole.GESTOR, UserRole.ADMIN_DP):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Líder não encontrado",
+                detail="Líder inelegível ou de outro tenant",
             )
     
     update_data = data.model_dump(exclude_unset=True)
