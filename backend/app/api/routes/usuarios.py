@@ -53,15 +53,18 @@ async def list_usuarios(
     query = select(Usuario).where(Usuario.tenant_id == tenant.tenant_id)
     count_query = select(func.count(Usuario.id)).where(Usuario.tenant_id == tenant.tenant_id)
     
-    # Colaboradores só veem sua equipe
+    # Colaboradores só veem sua equipe (ou apenas a si próprios se sem equipe)
     if current_user.papel == UserRole.COLABORADOR:
         result = await db.execute(
             select(Usuario.equipe_id).where(Usuario.id == current_user.id)
         )
         user_equipe = result.scalar_one_or_none()
-        if user_equipe:
+        if user_equipe is not None:
             query = query.where(Usuario.equipe_id == user_equipe)
             count_query = count_query.where(Usuario.equipe_id == user_equipe)
+        else:
+            query = query.where(Usuario.id == current_user.id)
+            count_query = count_query.where(Usuario.id == current_user.id)
     
     # Filtros
     if status_filter:
@@ -223,7 +226,7 @@ async def get_usuario(
             )
             current_equipe = user_result.scalar_one_or_none()
             
-            if usuario.equipe_id != current_equipe:
+            if current_equipe is None or usuario.equipe_id != current_equipe:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Acesso negado",
