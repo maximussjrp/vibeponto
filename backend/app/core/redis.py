@@ -1,6 +1,7 @@
 """Cliente Redis para cache, blacklist de tokens e rate limiting."""
 
 import json
+import secrets
 from typing import Any, Optional
 
 import redis.asyncio as redis
@@ -28,12 +29,13 @@ class RedisClient:
         except RuntimeError:
             current_loop = None
 
-        if self._pool is not None:
-            pool_loop = getattr(self._pool, "_loop", None)
-            if pool_loop is not None and (pool_loop.is_closed() or (current_loop and pool_loop is not current_loop)):
+        if self._pool is not None and current_loop is not None:
+            bound_loop = getattr(self, "_bound_loop", None)
+            if bound_loop is not None and (bound_loop.is_closed() or bound_loop is not current_loop):
                 self._pool = None
 
         if self._pool is None:
+            self._bound_loop = current_loop
             self._pool = redis.ConnectionPool.from_url(
                 str(settings.redis_url),
                 max_connections=20,
@@ -181,6 +183,56 @@ class RedisClient:
     async def invalidate_password_reset_token(self, token: str) -> None:
         """Invalida token de reset."""
         await self.client.delete(f"password_reset:{token}")
+
+    async def reserve_password_reset_token(
+        self,
+        token: str,
+        lock_ttl_seconds: int = 30,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Reserva o token de reset atomicamente sob concorrência (USR-43).
+        """
+        user_id = await self.client.get(f"password_reset:{token}")
+        if not user_id:
+            return None, None
+
+        lock_id = secrets.token_hex(16)
+        acquired = await self.client.set(
+            f"password_reset_lock:{token}",
+            lock_id,
+            nx=True,
+            ex=lock_ttl_seconds,
+        )
+        if not acquired:
+            return None, None
+
+        return user_id, lock_id
+
+    async def release_password_reset_lock(self, token: str, lock_id: str) -> bool:
+        """
+        Liberta a trava do token de reset de senha se o lock_id corresponder (USR-43).
+        """
+        script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+        """
+        result = await self.client.eval(script, 1, f"password_reset_lock:{token}", lock_id)
+        return bool(result)
+
+    async def finalize_password_reset(self, token: str, lock_id: str, user_id: str) -> bool:
+        """
+        Finaliza a redefinição de senha (USR-43):
+        1. Consome o token no Redis.
+        2. Libera a trava de concorrência.
+        3. Revoga todas as sessões ativas do usuário.
+        """
+        await self.consume_password_reset_user(token)
+        await self.release_password_reset_lock(token, lock_id)
+        await self.revoke_all_user_sessions(user_id)
+        return True
 
     # =========================================================================
     # Session Management

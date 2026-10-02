@@ -1,20 +1,13 @@
-"""Teste de integração com Redis real para o fluxo completo de reset de senha (USR-39)."""
+"""Testes de integração com PostgreSQL e Redis reais protegidos contra ambientes não autorizados (OPS-04, USR-43)."""
 
+import asyncio
 import os
-
-TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:54399/test_vibeponto")
-TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:56379/0")
-
-# Definir a variável de ambiente antes de qualquer import do app
-os.environ["REDIS_URL"] = TEST_REDIS_URL
-os.environ["DATABASE_URL"] = TEST_DATABASE_URL
-
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
 import pytest
-import redis.asyncio as redis
+import redis.asyncio as aioredis
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -22,13 +15,66 @@ from app.api.deps import get_db
 from app.core.config import settings
 from app.core.database import Base
 from app.core.rate_limit import auth_rate_limit
-from app.core.redis import RedisClient, get_redis
+from app.core.redis import RedisClient, get_redis, redis_client
 from app.core.security import hash_password, verify_password
 from app.main import app
 from app.models import Tenant, UserRole, UserStatus, Usuario
 
-settings.redis_url = TEST_REDIS_URL
-settings.database_url = TEST_DATABASE_URL
+TEST_DATABASE_URL = os.getenv(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:54399/test_vibeponto"
+)
+TEST_REDIS_URL = os.getenv(
+    "TEST_REDIS_URL",
+    "redis://localhost:56379/0"
+)
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+def assert_safe_test_environment() -> None:
+    """
+    OPS-04: Valida estritamente se os alvos de teste são ambientes dedicados e descartáveis.
+    Aborta com pytest.skip antes de executar qualquer DROP SCHEMA ou FLUSHDB.
+    """
+    allow_destructive = os.getenv("ALLOW_DESTRUCTIVE_TESTING", "true").lower()
+    if allow_destructive not in ("true", "1", "yes"):
+        pytest.skip("OPS-04: Testes destrutivos desativados via ALLOW_DESTRUCTIVE_TESTING.")
+
+    # Validar URL do PostgreSQL
+    db_url = TEST_DATABASE_URL.lower()
+    is_safe_db = (
+        ("54399" in db_url or "test" in db_url)
+        and ("localhost" in db_url or "127.0.0.1" in db_url or "test_pg" in db_url)
+        and not ("production" in db_url or "prod_vibeponto" in db_url)
+    )
+    if not is_safe_db:
+        pytest.skip(
+            f"OPS-04: Conexão PostgreSQL potencialmente perigosa/compartilhada negada: {TEST_DATABASE_URL}"
+        )
+
+    # Validar URL do Redis
+    redis_url = TEST_REDIS_URL.lower()
+    is_safe_redis = (
+        ("56379" in redis_url or "test" in redis_url)
+        and ("localhost" in redis_url or "127.0.0.1" in redis_url or "test_redis" in redis_url)
+        and not ("production" in redis_url or "prod_redis" in redis_url)
+    )
+    if not is_safe_redis:
+        pytest.skip(
+            f"OPS-04: Conexão Redis potencialmente perigosa/compartilhada negada: {TEST_REDIS_URL}"
+        )
+
+
+@pytest.fixture(autouse=True)
+def configure_test_settings(monkeypatch):
+    """
+    OPS-04: Altera configurações do sistema somente no escopo de execução do teste (via monkeypatch),
+    sem produzir efeitos colaterais globais na importação do módulo.
+    """
+    assert_safe_test_environment()
+    monkeypatch.setattr(settings, "redis_url", TEST_REDIS_URL)
+    monkeypatch.setattr(settings, "database_url", TEST_DATABASE_URL)
 
 
 @pytest.fixture
@@ -49,31 +95,55 @@ async def db_session_factory():
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_full_password_reset_flow_with_real_redis(db_session_factory):
+@pytest.fixture
+async def raw_redis():
     """
-    USR-39: Teste de integração real cobrindo a sequência completa do reset de senha:
-    1. Emitir token.
-    2. Verificar token: válido (POST /auth/password/reset/verify).
-    3. Confirmar que ele CONTINUA no Redis (operação PEEK não destrutiva).
-    4. Confirmar a redefinição de senha.
-    5. Verificar que a senha foi alterada no banco.
-    6. Verificar que o token foi consumido (GETDEL).
-    7. Tentar reutilizar o token: operação negada.
-    8. Confirmar a revogação das sessões.
+    Conexão Redis separada exclusivamente para asserções e limpeza nos testes.
+    NÃO é usada pela aplicação; a app cria seu próprio pool via get_redis().
     """
-    # Inicializar o pool de conexões do Redis estritamente dentro do event loop deste teste
-    if RedisClient._pool is not None:
-        await RedisClient._pool.disconnect()
-        RedisClient._pool = None
-    RedisClient._instance = None
+    pool = aioredis.ConnectionPool.from_url(TEST_REDIS_URL, decode_responses=True)
+    client = aioredis.Redis(connection_pool=pool)
+    await client.flushdb()
+    try:
+        yield client
+    finally:
+        await client.flushdb()
+        await pool.disconnect()
 
-    redis_pool = redis.ConnectionPool.from_url(TEST_REDIS_URL, decode_responses=True)
-    redis_client_obj = RedisClient()
-    redis_client_obj._pool = redis_pool
-    raw_redis = redis.Redis(connection_pool=redis_pool)
-    await raw_redis.flushdb()
 
+@pytest.fixture(autouse=True)
+async def _reset_redis_singleton():
+    """
+    Reseta o singleton RedisClient antes e depois de cada teste para garantir
+    que a aplicação crie um pool fresco dentro do contexto ASGI.
+    """
+    # Antes do teste: limpar qualquer pool anterior
+    if redis_client._pool is not None:
+        try:
+            await redis_client._pool.disconnect()
+        except Exception:
+            pass
+    redis_client._pool = None
+    if hasattr(redis_client, "_bound_loop"):
+        delattr(redis_client, "_bound_loop")
+
+    yield
+
+    # Depois do teste: limpar novamente
+    if redis_client._pool is not None:
+        try:
+            await redis_client._pool.disconnect()
+        except Exception:
+            pass
+    redis_client._pool = None
+    if hasattr(redis_client, "_bound_loop"):
+        delattr(redis_client, "_bound_loop")
+
+
+async def test_full_password_reset_flow_with_real_redis(db_session_factory, raw_redis):
+    """
+    USR-39 / USR-43: Sequência completa de reset de senha com Redis e PostgreSQL reais.
+    """
     tenant_id = uuid4()
     user_id = uuid4()
     original_password = "OldPassword123!"
@@ -103,42 +173,41 @@ async def test_full_password_reset_flow_with_real_redis(db_session_factory):
         session.add(user)
         await session.commit()
 
-    # Configurar dependency overrides
     async def override_get_db():
         async with db_session_factory() as session:
             yield session
 
+    # NÃO sobrescrever get_redis: deixar a app criar o pool dentro do contexto ASGI
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_redis] = lambda: redis_client_obj
     app.dependency_overrides[auth_rate_limit] = lambda: None
 
     try:
         with patch("app.core.email.email_service.send_password_reset", return_value=True):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                # --- Passo 1: Emitir token de reset ---
+                # 1. Emitir token de reset
                 res_req = await client.post("/api/v1/auth/password/reset", json={"email": "realredis@test.com"})
                 assert res_req.status_code == 200, res_req.text
 
-                # Recuperar token gravado no Redis real
+                # Recuperar token do Redis real (via raw_redis separado)
                 keys = await raw_redis.keys("password_reset:*")
                 assert len(keys) == 1, "Token de reset deveria ter sido gravado no Redis"
                 captured_token = keys[0].split("password_reset:")[1]
 
-                # Simular criação de sessão ativa para testar revogação no final
+                # Simular sessão ativa (via raw_redis separado)
                 session_key = f"session:{user_id}:test_session_1"
                 await raw_redis.set(session_key, "active_session_data")
 
-                # --- Passo 2: Verificar token via POST /auth/password/reset/verify ---
+                # 2. Verificar token via POST /auth/password/reset/verify
                 res_v1 = await client.post("/api/v1/auth/password/reset/verify", json={"token": captured_token})
                 assert res_v1.status_code == 200
                 assert res_v1.json()["message"] == "Token válido"
 
-                # --- Passo 3: Confirmar que o token CONTINUA no Redis real (operação PEEK não destrutiva) ---
+                # 3. Confirmar que o token CONTINUA no Redis (PEEK não destrutivo)
                 val_after_verify = await raw_redis.get(f"password_reset:{captured_token}")
                 assert val_after_verify == str(user_id), "PEEK não pode consumir o token!"
 
-                # --- Passo 4: Confirmar a redefinição de senha ---
+                # 4. Confirmar a redefinição de senha
                 res_conf = await client.post("/api/v1/auth/password/reset/confirm", json={
                     "token": captured_token,
                     "new_password": new_password,
@@ -147,31 +216,205 @@ async def test_full_password_reset_flow_with_real_redis(db_session_factory):
                 assert res_conf.status_code == 200
                 assert res_conf.json()["message"] == "Senha redefinida com sucesso"
 
-                # --- Passo 5: Verificar que a senha foi alterada no banco ---
+                # 5. Verificar que a senha foi alterada no banco
                 async with db_session_factory() as session:
                     user_db = await session.scalar(select(Usuario).where(Usuario.id == user_id))
                     assert verify_password(new_password, user_db.password_hash)
                     assert not verify_password(original_password, user_db.password_hash)
 
-                # --- Passo 6: Verificar que o token foi consumido (GETDEL) ---
+                # 6. Verificar que o token foi consumido (GETDEL)
                 val_after_confirm = await raw_redis.get(f"password_reset:{captured_token}")
-                assert val_after_confirm is None, "Token deveria ter sido consumido (GETDEL) após confirmação"
+                assert val_after_confirm is None, "Token deveria ter sido consumido após confirmação"
 
-                # --- Passo 7: Tentar reutilizar o token -> Operação Negada (400) ---
+                # 7. Tentar reutilizar o token -> Negado (400)
                 res_reuse = await client.post("/api/v1/auth/password/reset/confirm", json={
                     "token": captured_token,
                     "new_password": "ThirdPassword123!",
                     "confirm_password": "ThirdPassword123!",
                 })
                 assert res_reuse.status_code == 400
-                assert "Token inválido ou expirado" in res_reuse.json()["detail"]
+                assert "Token inválido" in res_reuse.json()["detail"] or "expirado" in res_reuse.json()["detail"]
 
-                # --- Passo 8: Confirmar revogação das sessões ---
+                # 8. Confirmar revogação de sessões
                 session_val = await raw_redis.get(session_key)
                 assert session_val is None, "Sessão ativa deveria ter sido revogada"
     finally:
-        await raw_redis.flushdb()
-        await redis_pool.disconnect()
-        RedisClient._instance = None
-        RedisClient._pool = None
+        app.dependency_overrides.clear()
+
+
+async def test_concurrent_password_reset_confirmations_with_real_redis(db_session_factory, raw_redis):
+    """
+    USR-43: Duas confirmações simultâneas com o mesmo token e senhas diferentes.
+    Garante exclusividade atômica (apenas uma requisição é processada com sucesso; a outra é rejeitada).
+    """
+    tenant_id = uuid4()
+    user_id = uuid4()
+    original_pass = "OldPassword123!"
+    password_alpha = "PasswordAlpha123!"
+    password_beta = "PasswordBeta456!"
+
+    async with db_session_factory() as session:
+        tenant = Tenant(
+            id=tenant_id,
+            nome="Concurrent Tenant",
+            cnpj="77665544000133",
+            email="conc@test.com",
+            ativo=True,
+        )
+        user = Usuario(
+            id=user_id,
+            tenant_id=tenant_id,
+            nome="Concurrent User",
+            email="concurrent@test.com",
+            cpf="87654321009",
+            matricula="CONC001",
+            password_hash=hash_password(original_pass),
+            papel=UserRole.COLABORADOR,
+            status=UserStatus.ACTIVE,
+        )
+        session.add(tenant)
+        session.add(user)
+        await session.commit()
+
+    async def override_get_db():
+        async with db_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[auth_rate_limit] = lambda: None
+
+    try:
+        with patch("app.core.email.email_service.send_password_reset", return_value=True):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                # Emitir token
+                res_req = await client.post("/api/v1/auth/password/reset", json={"email": "concurrent@test.com"})
+                assert res_req.status_code == 200
+
+                keys = await raw_redis.keys("password_reset:*")
+                captured_token = keys[0].split("password_reset:")[1]
+
+                # Executar duas confirmações simultâneas via asyncio.gather
+                req_a = client.post("/api/v1/auth/password/reset/confirm", json={
+                    "token": captured_token,
+                    "new_password": password_alpha,
+                    "confirm_password": password_alpha,
+                })
+                req_b = client.post("/api/v1/auth/password/reset/confirm", json={
+                    "token": captured_token,
+                    "new_password": password_beta,
+                    "confirm_password": password_beta,
+                })
+
+                res_a, res_b = await asyncio.gather(req_a, req_b)
+
+                statuses = sorted([res_a.status_code, res_b.status_code])
+                assert statuses == [200, 400], f"Esperado um 200 e um 400 sob concorrência, obteve: {statuses}"
+
+                # Confirmar qual requisição venceu no banco
+                async with db_session_factory() as session:
+                    user_db = await session.scalar(select(Usuario).where(Usuario.id == user_id))
+                    alpha_match = verify_password(password_alpha, user_db.password_hash)
+                    beta_match = verify_password(password_beta, user_db.password_hash)
+
+                    # Exatamente uma das duas senhas foi gravada
+                    assert (alpha_match and not beta_match) or (beta_match and not alpha_match)
+
+                # Confirmar que o token foi removido do Redis
+                val_after = await raw_redis.get(f"password_reset:{captured_token}")
+                assert val_after is None
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_password_reset_db_failure_retains_token_in_redis(db_session_factory, raw_redis):
+    """
+    USR-43: Em caso de falha no banco durante o commit da nova senha, o token NÃO pode ser consumido no Redis.
+    Garante que a trava é liberada e que o usuário pode tentar novamente após o banco se recuperar.
+    """
+    tenant_id = uuid4()
+    user_id = uuid4()
+    original_pass = "OldPassword123!"
+    new_pass = "RecoverablePassword123!"
+
+    async with db_session_factory() as session:
+        tenant = Tenant(
+            id=tenant_id,
+            nome="Failure Recovery Tenant",
+            cnpj="66554433000122",
+            email="failrec@test.com",
+            ativo=True,
+        )
+        user = Usuario(
+            id=user_id,
+            tenant_id=tenant_id,
+            nome="Failure User",
+            email="failure@test.com",
+            cpf="76543210098",
+            matricula="FAIL001",
+            password_hash=hash_password(original_pass),
+            papel=UserRole.COLABORADOR,
+            status=UserStatus.ACTIVE,
+        )
+        session.add(tenant)
+        session.add(user)
+        await session.commit()
+
+    # Injetar falha de banco simulada no primeiro commit
+    async def failing_db_override():
+        db_mock = AsyncMock()
+        db_mock.execute = AsyncMock(side_effect=RuntimeError("Simulated Database Outage"))
+        db_mock.rollback = AsyncMock()
+        yield db_mock
+
+    app.dependency_overrides[auth_rate_limit] = lambda: None
+
+    try:
+        with patch("app.core.email.email_service.send_password_reset", return_value=True):
+            # Primeiro: emitir token com banco normal
+            async def normal_db_override():
+                async with db_session_factory() as session:
+                    yield session
+
+            app.dependency_overrides[get_db] = normal_db_override
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                res_req = await client.post("/api/v1/auth/password/reset", json={"email": "failure@test.com"})
+                assert res_req.status_code == 200
+
+                keys = await raw_redis.keys("password_reset:*")
+                captured_token = keys[0].split("password_reset:")[1]
+
+                # Agora simular falha de banco durante o confirm
+                app.dependency_overrides[get_db] = failing_db_override
+                res_fail = await client.post("/api/v1/auth/password/reset/confirm", json={
+                    "token": captured_token,
+                    "new_password": new_pass,
+                    "confirm_password": new_pass,
+                })
+                assert res_fail.status_code == 500
+                assert "Erro ao atualizar a senha no banco" in res_fail.json()["detail"]
+
+                # Verificar que o token CONTINUA no Redis intacto
+                token_val_after_fail = await raw_redis.get(f"password_reset:{captured_token}")
+                assert token_val_after_fail == str(user_id), "Token não pode ser consumido quando o banco falha!"
+
+                # E a trava de concorrência foi liberada
+                lock_val = await raw_redis.get(f"password_reset_lock:{captured_token}")
+                assert lock_val is None, "Trava de concorrência deve ser liberada após erro no banco"
+
+                # Restaurar banco normal e tentar confirmação novamente -> Sucesso!
+                app.dependency_overrides[get_db] = normal_db_override
+                res_retry = await client.post("/api/v1/auth/password/reset/confirm", json={
+                    "token": captured_token,
+                    "new_password": new_pass,
+                    "confirm_password": new_pass,
+                })
+                assert res_retry.status_code == 200
+                assert res_retry.json()["message"] == "Senha redefinida com sucesso"
+
+                # Agora sim o token foi consumido
+                token_val_after_success = await raw_redis.get(f"password_reset:{captured_token}")
+                assert token_val_after_success is None
+    finally:
         app.dependency_overrides.clear()

@@ -533,28 +533,52 @@ async def confirm_password_reset(
     db: Annotated[AsyncSession, Depends(get_db)],
     redis: Annotated[RedisClient, Depends(get_redis)],
 ):
-    """Confirmar reset de senha com token."""
-    # 1. Peek token user_id no Redis sem consumir
-    user_id = await redis.peek_password_reset_user(request.token)
+    """Confirmar reset de senha com reserva atômica de token (USR-43)."""
+    # 1. Reservar token no Redis atômica e exclusivamente
+    user_id, lock_id = await redis.reserve_password_reset_token(request.token)
 
-    if not user_id:
+    if not user_id or not lock_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Token inválido ou expirado",
+            detail="Token inválido, expirado ou em processamento",
         )
 
-    # 2. Atualizar senha no banco
-    await db.execute(
-        update(Usuario)
-        .where(Usuario.id == UUID(user_id))
-        .values(password_hash=hash_password(request.new_password))
-    )
-    # Se db.commit() falhar, o token não é consumido e permanece válido para nova tentativa
-    await db.commit()
+    # 2. Atualizar a senha no banco de dados com tratamento seguro de erros
+    try:
+        await db.execute(
+            update(Usuario)
+            .where(Usuario.id == UUID(user_id))
+            .values(password_hash=hash_password(request.new_password))
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        # Se a atualização do banco falhou, libera a trava sem consumir o token no Redis
+        await redis.release_password_reset_lock(request.token, lock_id)
+        logger.exception("Falha no banco de dados durante redefinição de senha para usuario %s: %s", user_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao atualizar a senha no banco de dados. Tente novamente.",
+        ) from exc
 
-    # 3. Consumir token no Redis e revogar todas as sessões ativas somente após o commit com sucesso
-    await redis.consume_password_reset_user(request.token)
-    await redis.revoke_all_user_sessions(user_id)
+    # 3. Consumir o token no Redis e revogar sessões ativas após o commit no banco
+    try:
+        await redis.finalize_password_reset(request.token, lock_id, user_id)
+    except Exception as redis_exc:
+        logger.error(
+            "Falha crítica no Redis ao finalizar reset ou revogar sessões para usuário %s: %s",
+            user_id,
+            redis_exc,
+            exc_info=True,
+        )
+        try:
+            await redis.consume_password_reset_user(request.token)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Senha redefinida no banco, porém ocorreu falha ao revogar sessões no Redis.",
+        ) from redis_exc
 
     return SuccessResponse(message="Senha redefinida com sucesso")
 

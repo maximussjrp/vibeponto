@@ -194,15 +194,14 @@ async def test_verify_password_reset_token_endpoint():
 
 @pytest.mark.asyncio
 async def test_confirm_password_reset_updates_password_and_invalidates():
-    """USR-34 / USR-39: Redefinição concluída atualiza a senha, consome o token e revoga todas as sessões."""
+    """USR-34 / USR-39 / USR-43: Redefinição concluída atualiza a senha, consome o token e revoga todas as sessões."""
     tenant_id = uuid4()
     user_id = uuid4()
     user = MockUser(user_id, tenant_id, UserRole.COLABORADOR)
 
     mock_redis = AsyncMock()
-    mock_redis.peek_password_reset_user = AsyncMock(return_value=str(user_id))
-    mock_redis.consume_password_reset_user = AsyncMock()
-    mock_redis.revoke_all_user_sessions = AsyncMock()
+    mock_redis.reserve_password_reset_token = AsyncMock(return_value=(str(user_id), "mock_lock_id"))
+    mock_redis.finalize_password_reset = AsyncMock(return_value=True)
 
     async def fake_execute(stmt, *args, **kwargs):
         return FakeResult([user], scalar_val=user)
@@ -227,10 +226,9 @@ async def test_confirm_password_reset_updates_password_and_invalidates():
                 assert res.status_code == 200
                 assert res.json()["message"] == "Senha redefinida com sucesso"
 
-                # Verificar que peek consultou, consume invalidou token e revogou sessoes
-                mock_redis.peek_password_reset_user.assert_called_once_with("valid_reset_token")
-                mock_redis.consume_password_reset_user.assert_called_once_with("valid_reset_token")
-                mock_redis.revoke_all_user_sessions.assert_called_once_with(str(user_id))
+                # Verificar que reservou token e finalizou reset
+                mock_redis.reserve_password_reset_token.assert_called_once_with("valid_reset_token")
+                mock_redis.finalize_password_reset.assert_called_once_with("valid_reset_token", "mock_lock_id", str(user_id))
     finally:
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_redis, None)
