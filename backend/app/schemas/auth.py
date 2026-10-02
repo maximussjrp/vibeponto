@@ -98,6 +98,13 @@ class PasswordResetConfirm(BaseSchema):
         return v
 
 
+class PasswordResetVerifyRequest(BaseSchema):
+    """Verificação de token de reset de senha via POST body."""
+
+    token: str = Field(..., min_length=1, description="Token de recuperação de senha")
+
+
+
 # ============================================================================
 # MFA
 # ============================================================================

@@ -13,6 +13,7 @@ from app.api.deps import CurrentUser, get_current_user, get_db
 from app.core.config import settings
 from app.core.observability import record_auth_attempt
 from app.core.rate_limit import auth_rate_limit
+from app.core.redis import RedisClient, get_redis
 from app.core.security import (
     encrypt_totp_secret,
     generate_totp_secret,
@@ -41,6 +42,8 @@ from app.schemas import (
     PasswordChangeRequest,
     PasswordResetConfirm,
     PasswordResetRequest,
+    PasswordResetVerifyRequest,
+
     RefreshTokenRequest,
     RegisterTenantRequest,
     RegisterTenantResponse,
@@ -472,6 +475,7 @@ async def change_password(
 async def request_password_reset(
     request: PasswordResetRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[RedisClient, Depends(get_redis)],
 ):
     """
     Solicitar reset de senha.
@@ -494,6 +498,7 @@ async def request_password_reset(
                 user_id=str(usuario.id),
                 email=usuario.email,
                 nome=usuario.nome,
+                redis=redis,
             )
         except PasswordResetEmailError:
             # Em erro no envio de e-mail no fluxo público, o token é invalidado
@@ -505,15 +510,13 @@ async def request_password_reset(
     )
 
 
-@router.get("/password/reset/verify", response_model=SuccessResponse)
+@router.post("/password/reset/verify", response_model=SuccessResponse)
 async def verify_password_reset_token(
-    token: str = Query(..., description="Token de recuperação de senha"),
+    request: PasswordResetVerifyRequest,
+    redis: Annotated[RedisClient, Depends(get_redis)],
 ):
-    """Verificar se token de reset de senha é válido sem consumi-lo."""
-    from app.core.redis import get_redis
-
-    redis = await get_redis()
-    user_id = await redis.get_password_reset_user(token)
+    """Verificar se token de reset de senha é válido sem consumi-lo (operação não destrutiva)."""
+    user_id = await redis.peek_password_reset_user(request.token)
 
     if not user_id:
         raise HTTPException(
@@ -524,18 +527,15 @@ async def verify_password_reset_token(
     return SuccessResponse(message="Token válido")
 
 
-
 @router.post("/password/reset/confirm", response_model=SuccessResponse)
 async def confirm_password_reset(
     request: PasswordResetConfirm,
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[RedisClient, Depends(get_redis)],
 ):
     """Confirmar reset de senha com token."""
-    from app.core.redis import get_redis
-
-    # Verificar token no Redis
-    redis = await get_redis()
-    user_id = await redis.get_password_reset_user(request.token)
+    # 1. Peek token user_id no Redis sem consumir
+    user_id = await redis.peek_password_reset_user(request.token)
 
     if not user_id:
         raise HTTPException(
@@ -543,21 +543,21 @@ async def confirm_password_reset(
             detail="Token inválido ou expirado",
         )
 
-    # Atualizar senha
+    # 2. Atualizar senha no banco
     await db.execute(
         update(Usuario)
         .where(Usuario.id == UUID(user_id))
         .values(password_hash=hash_password(request.new_password))
     )
+    # Se db.commit() falhar, o token não é consumido e permanece válido para nova tentativa
     await db.commit()
 
-    # Invalidar token usado
-    await redis.invalidate_password_reset_token(request.token)
-
-    # Revogar todas as sessões do usuário
+    # 3. Consumir token no Redis e revogar todas as sessões ativas somente após o commit com sucesso
+    await redis.consume_password_reset_user(request.token)
     await redis.revoke_all_user_sessions(user_id)
 
     return SuccessResponse(message="Senha redefinida com sucesso")
+
 
 
 # ============================================================================

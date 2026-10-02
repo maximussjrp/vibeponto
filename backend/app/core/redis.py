@@ -1,7 +1,7 @@
 """Cliente Redis para cache, blacklist de tokens e rate limiting."""
 
-from typing import Any, Optional
 import json
+from typing import Any, Optional
 
 import redis.asyncio as redis
 
@@ -10,60 +10,72 @@ from app.core.config import settings
 
 class RedisClient:
     """Cliente Redis singleton."""
-    
+
     _instance: Optional["RedisClient"] = None
     _pool: Optional[redis.ConnectionPool] = None
-    
+
     def __new__(cls) -> "RedisClient":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     async def connect(self) -> None:
         """Inicializa o pool de conexões."""
+        import asyncio
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if self._pool is not None:
+            pool_loop = getattr(self._pool, "_loop", None)
+            if pool_loop is not None and (pool_loop.is_closed() or (current_loop and pool_loop is not current_loop)):
+                self._pool = None
+
         if self._pool is None:
             self._pool = redis.ConnectionPool.from_url(
                 str(settings.redis_url),
                 max_connections=20,
                 decode_responses=True,
             )
-    
+
     @property
     def client(self) -> redis.Redis:
         """Retorna cliente Redis."""
         if self._pool is None:
             raise RuntimeError("Redis não conectado. Chame connect() primeiro.")
         return redis.Redis(connection_pool=self._pool)
-    
+
     async def close(self) -> None:
         """Fecha conexões."""
         if self._pool:
             await self._pool.disconnect()
             self._pool = None
-    
+
     # =========================================================================
     # Token Blacklist (Logout)
     # =========================================================================
-    
+
     async def blacklist_token(self, token: str, ttl_seconds: int = 86400) -> None:
         """
         Adiciona token à blacklist.
-        
+
         Args:
             token: Token JWT
             ttl_seconds: Tempo de vida na blacklist (padrão 24h)
         """
         await self.client.setex(f"blacklist:{token}", ttl_seconds, "1")
-    
+
     async def is_token_blacklisted(self, token: str) -> bool:
         """Verifica se token está na blacklist."""
         result = await self.client.get(f"blacklist:{token}")
         return result is not None
-    
+
     # =========================================================================
     # Rate Limiting
     # =========================================================================
-    
+
     async def check_rate_limit(
         self,
         key: str,
@@ -72,24 +84,24 @@ class RedisClient:
     ) -> tuple[bool, int, int]:
         """
         Verifica rate limit com sliding window.
-        
+
         Args:
             key: Identificador único (ex: user_id, ip)
             max_requests: Máximo de requisições permitidas
             window_seconds: Janela de tempo
-            
+
         Returns:
             tuple: (allowed, remaining, reset_time)
         """
         import time
         from uuid import uuid4
-        
+
         now = int(time.time())
         window_start = now - window_seconds
-        
+
         pipeline = self.client.pipeline()
         redis_key = f"ratelimit:{key}"
-        
+
         # Remover entradas antigas
         pipeline.zremrangebyscore(redis_key, "-inf", window_start)
         # Adicionar requisição atual
@@ -98,27 +110,27 @@ class RedisClient:
         pipeline.zcard(redis_key)
         # Definir expiração
         pipeline.expire(redis_key, window_seconds)
-        
+
         results = await pipeline.execute()
         request_count = results[2]
-        
+
         allowed = request_count <= max_requests
         remaining = max(0, max_requests - request_count)
         reset_time = now + window_seconds
-        
+
         return allowed, remaining, reset_time
-    
+
     # =========================================================================
     # Cache Genérico
     # =========================================================================
-    
+
     async def cache_get(self, key: str) -> Optional[Any]:
         """Obtém valor do cache."""
         data = await self.client.get(f"cache:{key}")
         if data:
             return json.loads(data)
         return None
-    
+
     async def cache_set(
         self,
         key: str,
@@ -131,20 +143,20 @@ class RedisClient:
             ttl_seconds,
             json.dumps(value, default=str),
         )
-    
+
     async def cache_delete(self, key: str) -> None:
         """Remove valor do cache."""
         await self.client.delete(f"cache:{key}")
-    
+
     async def cache_clear_pattern(self, pattern: str) -> None:
         """Remove valores que correspondem ao padrão."""
         async for key in self.client.scan_iter(f"cache:{pattern}"):
             await self.client.delete(key)
-    
+
     # =========================================================================
     # Password Reset Tokens
     # =========================================================================
-    
+
     async def store_password_reset_token(
         self,
         user_id: str,
@@ -153,19 +165,27 @@ class RedisClient:
     ) -> None:
         """Armazena token de reset de senha (1h padrão)."""
         await self.client.setex(f"password_reset:{token}", ttl_seconds, user_id)
-    
-    async def get_password_reset_user(self, token: str) -> Optional[str]:
-        """Obtém user_id pelo token de reset."""
+
+    async def peek_password_reset_user(self, token: str) -> Optional[str]:
+        """Consulta user_id pelo token de reset sem consumi-lo (operação GET pura)."""
+        return await self.client.get(f"password_reset:{token}")
+
+    async def consume_password_reset_user(self, token: str) -> Optional[str]:
+        """Obtém e consome user_id pelo token de reset em operação atômica (GETDEL)."""
         return await self.client.getdel(f"password_reset:{token}")
-    
+
+    async def get_password_reset_user(self, token: str) -> Optional[str]:
+        """Consulta user_id pelo token de reset sem consumi-lo (GET - alias de peek)."""
+        return await self.peek_password_reset_user(token)
+
     async def invalidate_password_reset_token(self, token: str) -> None:
         """Invalida token de reset."""
         await self.client.delete(f"password_reset:{token}")
-    
+
     # =========================================================================
     # Session Management
     # =========================================================================
-    
+
     async def store_user_session(
         self,
         user_id: str,
@@ -179,7 +199,7 @@ class RedisClient:
             ttl_seconds,
             json.dumps(data, default=str),
         )
-    
+
     async def get_user_sessions(self, user_id: str) -> list[dict]:
         """Lista todas as sessões ativas do usuário."""
         sessions = []
@@ -190,11 +210,11 @@ class RedisClient:
                 session["session_id"] = key.split(":")[-1]
                 sessions.append(session)
         return sessions
-    
+
     async def revoke_user_session(self, user_id: str, session_id: str) -> None:
         """Revoga uma sessão específica."""
         await self.client.delete(f"session:{user_id}:{session_id}")
-    
+
     async def revoke_all_user_sessions(self, user_id: str) -> int:
         """Revoga todas as sessões do usuário."""
         count = 0

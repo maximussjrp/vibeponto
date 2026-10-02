@@ -9,6 +9,8 @@ from app.schemas.auth import (
     PasswordChangeRequest,
     PasswordResetRequest,
     PasswordResetConfirm,
+    PasswordResetVerifyRequest,
+
     # MFA
     MFASetupResponse,
     MFAVerifyRequest,

@@ -9,6 +9,7 @@ import pytest
 
 from app.api.deps import get_current_user, get_db, get_tenant_context
 from app.core.rate_limit import auth_rate_limit
+from app.core.redis import get_redis
 from app.core.security import hash_password
 from app.main import app
 from app.models.models import UserRole, UserStatus
@@ -163,39 +164,44 @@ async def test_admin_password_reset_route_reports_502_error():
 
 @pytest.mark.asyncio
 async def test_verify_password_reset_token_endpoint():
-    """USR-38: GET /auth/password/reset/verify valida a existência do token no Redis."""
+    """USR-38 / USR-39: POST /auth/password/reset/verify valida a existência do token no Redis sem consumi-lo."""
     mock_redis = AsyncMock()
 
-    async def fake_get_user(token):
+    async def fake_peek_user(token):
         if token == "valid_token_123":
             return str(uuid4())
         return None
 
-    mock_redis.get_password_reset_user = AsyncMock(side_effect=fake_get_user)
+    mock_redis.peek_password_reset_user = AsyncMock(side_effect=fake_peek_user)
 
-    with patch("app.core.redis.get_redis", return_value=mock_redis):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            # 1. Token válido -> 200 OK
-            res_valid = await client.get("/api/v1/auth/password/reset/verify?token=valid_token_123")
-            assert res_valid.status_code == 200
-            assert res_valid.json()["message"] == "Token válido"
+    app.dependency_overrides[get_redis] = lambda: mock_redis
 
-            # 2. Token inválido -> 400 Bad Request
-            res_invalid = await client.get("/api/v1/auth/password/reset/verify?token=invalid_token_999")
-            assert res_invalid.status_code == 400
-            assert "Token inválido ou expirado" in res_invalid.json()["detail"]
+    try:
+        with patch("app.core.redis.get_redis", return_value=mock_redis):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                # 1. Token válido -> 200 OK via POST no body
+                res_valid = await client.post("/api/v1/auth/password/reset/verify", json={"token": "valid_token_123"})
+                assert res_valid.status_code == 200
+                assert res_valid.json()["message"] == "Token válido"
+
+                # 2. Token inválido -> 400 Bad Request
+                res_invalid = await client.post("/api/v1/auth/password/reset/verify", json={"token": "invalid_token_999"})
+                assert res_invalid.status_code == 400
+                assert "Token inválido ou expirado" in res_invalid.json()["detail"]
+    finally:
+        app.dependency_overrides.pop(get_redis, None)
 
 
 @pytest.mark.asyncio
 async def test_confirm_password_reset_updates_password_and_invalidates():
-    """USR-34: Redefinição concluída atualiza a senha, invalida o token e revoga todas as sessões."""
+    """USR-34 / USR-39: Redefinição concluída atualiza a senha, consome o token e revoga todas as sessões."""
     tenant_id = uuid4()
     user_id = uuid4()
     user = MockUser(user_id, tenant_id, UserRole.COLABORADOR)
 
     mock_redis = AsyncMock()
-    mock_redis.get_password_reset_user = AsyncMock(return_value=str(user_id))
-    mock_redis.invalidate_password_reset_token = AsyncMock()
+    mock_redis.peek_password_reset_user = AsyncMock(return_value=str(user_id))
+    mock_redis.consume_password_reset_user = AsyncMock()
     mock_redis.revoke_all_user_sessions = AsyncMock()
 
     async def fake_execute(stmt, *args, **kwargs):
@@ -208,19 +214,23 @@ async def test_confirm_password_reset_updates_password_and_invalidates():
         yield db
 
     app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_redis] = lambda: mock_redis
 
-    with patch("app.core.redis.get_redis", return_value=mock_redis):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            res = await client.post("/api/v1/auth/password/reset/confirm", json={
-                "token": "valid_reset_token",
-                "new_password": "NewSecurePassword123!",
-                "confirm_password": "NewSecurePassword123!",
-            })
-            assert res.status_code == 200
-            assert res.json()["message"] == "Senha redefinida com sucesso"
+    try:
+        with patch("app.core.redis.get_redis", return_value=mock_redis):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                res = await client.post("/api/v1/auth/password/reset/confirm", json={
+                    "token": "valid_reset_token",
+                    "new_password": "NewSecurePassword123!",
+                    "confirm_password": "NewSecurePassword123!",
+                })
+                assert res.status_code == 200
+                assert res.json()["message"] == "Senha redefinida com sucesso"
 
-            # Verificar que invalidou token e revogou sessoes
-            mock_redis.invalidate_password_reset_token.assert_called_once_with("valid_reset_token")
-            mock_redis.revoke_all_user_sessions.assert_called_once_with(str(user_id))
-
-    app.dependency_overrides.pop(get_db, None)
+                # Verificar que peek consultou, consume invalidou token e revogou sessoes
+                mock_redis.peek_password_reset_user.assert_called_once_with("valid_reset_token")
+                mock_redis.consume_password_reset_user.assert_called_once_with("valid_reset_token")
+                mock_redis.revoke_all_user_sessions.assert_called_once_with(str(user_id))
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_redis, None)

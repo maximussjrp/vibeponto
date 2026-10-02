@@ -18,7 +18,12 @@ class PasswordResetEmailError(Exception):
         self.message = message
 
 
-async def execute_password_reset_request(user_id: UUID | str, email: str, nome: str) -> str:
+async def execute_password_reset_request(
+    user_id: UUID | str,
+    email: str,
+    nome: str,
+    redis=None,
+) -> str:
     """
     Helper unificado para solicitação de reset de senha.
 
@@ -31,7 +36,8 @@ async def execute_password_reset_request(user_id: UUID | str, email: str, nome: 
     token = secrets.token_urlsafe(32)
     str_user_id = str(user_id)
 
-    redis = await get_redis()
+    if redis is None:
+        redis = await get_redis()
     await redis.store_password_reset_token(
         user_id=str_user_id,
         token=token,

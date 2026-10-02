@@ -68,7 +68,8 @@ function RedefinirSenhaContent() {
     let isMounted = true;
     const verifyToken = async () => {
       try {
-        await api.get(`/auth/password/reset/verify?token=${encodeURIComponent(token)}`);
+        await api.post("/auth/password/reset/verify", { token });
+
         if (isMounted) setIsValidToken(true);
       } catch (error) {
         if (isMounted) setIsValidToken(false);
