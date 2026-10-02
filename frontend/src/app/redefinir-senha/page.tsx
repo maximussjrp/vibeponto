@@ -62,10 +62,25 @@ function RedefinirSenhaContent() {
   useEffect(() => {
     if (!token) {
       setIsValidToken(false);
-    } else {
-      setIsValidToken(true);
+      return;
     }
+
+    let isMounted = true;
+    const verifyToken = async () => {
+      try {
+        await api.get(`/auth/password/reset/verify?token=${encodeURIComponent(token)}`);
+        if (isMounted) setIsValidToken(true);
+      } catch (error) {
+        if (isMounted) setIsValidToken(false);
+      }
+    };
+
+    verifyToken();
+    return () => {
+      isMounted = false;
+    };
   }, [token]);
+
 
   const onSubmit = async (data: SenhaForm) => {
     if (!token) return;
