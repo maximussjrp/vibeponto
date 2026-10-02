@@ -50,10 +50,20 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+
+    # 1. Pre-check: count usuarios with null CPF BEFORE making schema changes
+    null_cpfs = bind.execute(sa.text("SELECT COUNT(*) FROM usuarios WHERE cpf IS NULL")).scalar()
+    if null_cpfs and null_cpfs > 0:
+        raise RuntimeError(
+            f"Impossível reverter migração {revision}: existem {null_cpfs} usuário(s) com CPF nulo no banco. "
+            "Preencha os CPFs antes de prosseguir com o downgrade."
+        )
+
+    # 2. Drop unique lower email index
     dialect_name = bind.dialect.name
     if dialect_name == "postgresql":
         op.drop_index("uq_usuario_tenant_email_lower", table_name="usuarios", if_exists=True)
 
-    null_cpfs = bind.execute(sa.text("SELECT COUNT(*) FROM usuarios WHERE cpf IS NULL")).scalar()
-    if null_cpfs == 0:
-        op.alter_column("usuarios", "cpf", existing_type=sa.String(14), nullable=False)
+    # 3. Restore NOT NULL constraint on cpf column
+    op.alter_column("usuarios", "cpf", existing_type=sa.String(14), nullable=False)
+
