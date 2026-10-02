@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,6 +50,8 @@ from app.schemas import (
     UsuarioSelfUpdate,
 )
 from app.services.mfa import generate_backup_codes, replace_backup_codes, verify_mfa_code
+from app.services.password_reset import execute_password_reset_request, PasswordResetEmailError
+
 
 router = APIRouter(prefix="/auth", tags=["Autenticação"], dependencies=[Depends(auth_rate_limit)])
 logger = logging.getLogger(__name__)
@@ -475,12 +477,8 @@ async def request_password_reset(
     Solicitar reset de senha.
 
     Envia email com link/token para reset.
+    Sempre retorna resposta genérica para evitar enumeração de usuários.
     """
-    import secrets
-
-    from app.core.email import email_service
-    from app.core.redis import get_redis
-
     # Buscar usuário
     result = await db.execute(
         select(Usuario).where(Usuario.email == request.email,
@@ -490,42 +488,41 @@ async def request_password_reset(
     users = result.scalars().all()
     usuario = users[0] if len(users) == 1 else None
 
-    # Sempre retorna sucesso para não expor se email existe
     if usuario:
-        # Gerar token de reset
-        token = secrets.token_urlsafe(32)
-
-        # Salvar no Redis (1 hora de validade)
-        redis = await get_redis()
-        await redis.store_password_reset_token(
-            user_id=str(usuario.id),
-            token=token,
-            ttl_seconds=3600,
-        )
-
-        # Enviar email
         try:
-            sent = await email_service.send_password_reset(
+            await execute_password_reset_request(
+                user_id=str(usuario.id),
                 email=usuario.email,
-                token=token,
                 nome=usuario.nome,
             )
-            if not sent:
-                logger.error(
-                    "Password reset email delivery failed",
-                    extra={"user_id": str(usuario.id)},
-                )
-                await redis.invalidate_password_reset_token(token)
-        except Exception:
-            logger.exception(
-                "Password reset email provider unavailable",
-                extra={"user_id": str(usuario.id)},
-            )
-            await redis.invalidate_password_reset_token(token)
+        except PasswordResetEmailError:
+            # Em erro no envio de e-mail no fluxo público, o token é invalidado
+            # pelo helper e mantemos a resposta genérica por proteção contra enumeração.
+            pass
 
     return SuccessResponse(
         message="Se o email existir no sistema, um link de recuperação será enviado"
     )
+
+
+@router.get("/password/reset/verify", response_model=SuccessResponse)
+async def verify_password_reset_token(
+    token: str = Query(..., description="Token de recuperação de senha"),
+):
+    """Verificar se token de reset de senha é válido sem consumi-lo."""
+    from app.core.redis import get_redis
+
+    redis = await get_redis()
+    user_id = await redis.get_password_reset_user(token)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token inválido ou expirado",
+        )
+
+    return SuccessResponse(message="Token válido")
+
 
 
 @router.post("/password/reset/confirm", response_model=SuccessResponse)

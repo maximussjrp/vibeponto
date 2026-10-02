@@ -32,7 +32,11 @@ from app.schemas import (
 )
 
 
+from app.services.password_reset import execute_password_reset_request, PasswordResetEmailError
+
+
 router = APIRouter(prefix="/usuarios", tags=["Usuários"])
+
 
 
 @router.get("")
@@ -512,12 +516,8 @@ async def admin_reset_password(
     Reset de senha pelo admin.
     
     Gera token de recuperação seguro sem alterar password_hash diretamente.
-    Revoga sessões ativas do usuário.
+    Retorna erro 502 explícito para o admin se o e-mail falhar.
     """
-    import secrets
-    from app.core.email import email_service
-    from app.core.redis import get_redis
-
     result = await db.execute(
         select(Usuario).where(
             Usuario.id == usuario_id,
@@ -532,36 +532,19 @@ async def admin_reset_password(
             detail="Usuário não encontrado",
         )
     
-    token = secrets.token_urlsafe(32)
-    
-    redis = await get_redis()
-    await redis.store_password_reset_token(
-        user_id=str(usuario.id),
-        token=token,
-        ttl_seconds=3600,
-    )
-    
     try:
-        sent = await email_service.send_password_reset(
+        await execute_password_reset_request(
+            user_id=str(usuario.id),
             email=usuario.email,
-            token=token,
             nome=usuario.nome,
         )
-        if not sent:
-            await redis.invalidate_password_reset_token(token)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Falha ao enviar e-mail de recuperação de senha",
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        await redis.invalidate_password_reset_token(token)
+    except PasswordResetEmailError as exc:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Serviço de e-mail indisponível para recuperação de senha",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
         )
     
     return SuccessResponse(
         message="Link de recuperação de senha gerado e enviado ao usuário."
     )
+
