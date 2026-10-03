@@ -1,6 +1,6 @@
 """
 Testes automatizados do backend VibePonto (E2E e Unitários).
-Organizados e classificados por efeito operacional (E2E-01, E2E-02, E2E-03).
+Organizados e classificados por efeito operacional (E2E-01 a E2E-05, STG.1-PLAN-01 a STG.1-PLAN-06).
 """
 
 import asyncio
@@ -16,21 +16,25 @@ import pytest
 os.environ.setdefault("SECRET_KEY", "k9X!mP4vL8zR2wQ7nT1yU6bV3cC5aD0eF")
 os.environ.setdefault("MFA_ENCRYPTION_KEY", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6")
 
-# ==================== Credenciais Sintéticas de Staging (E2E-02) ====================
+# ==================== Configurações e Credenciais Sintéticas de Staging (E2E-02, STG.1-PLAN-04) ====================
 STAGING_API_BASE_URL = os.getenv("STAGING_API_BASE_URL", "http://localhost:8000/api/v1")
-STAGING_ADMIN_EMAIL = os.getenv("STAGING_ADMIN_EMAIL", "staging_admin_e2e@staging.vibeponto.com")
-STAGING_ADMIN_PASSWORD = os.getenv("STAGING_ADMIN_PASSWORD", "StagingAdminPassword123!")
+STAGING_ADMIN_EMAIL = os.getenv("STAGING_ADMIN_EMAIL", "").strip()
+STAGING_ADMIN_PASSWORD = os.getenv("STAGING_ADMIN_PASSWORD", "").strip()
 
 
 # ============================================================================
-# 1. TESTES UNITÁRIOS (Sem dependência de servidor HTTP live - E2E-03)
+# 1. TESTES UNITÁRIOS DE SERVIÇOS REAIS (Sem servidor HTTP - STG.1-PLAN-06)
 # ============================================================================
 
 class TestUnitCalculoHoras:
-    """Testes unitários do módulo de jornada e comprovantes de ponto (nunca são pulados por ausência de servidor HTTP)."""
+    """
+    Testes unitários de serviços reais do produto (STG.1-PLAN-06).
+    Testa utilitários de timekeeping (comprovante_hash, has_coordinates, point_geom) e aritmética nativa.
+    Nota: A regra de negócio completa de apuração de jornada e banco de horas é pendente dos Blocos 05/12.
+    """
 
-    def test_calcular_horas_normais(self):
-        """Teste unitário de cálculo de jornada normal de 8 horas."""
+    def test_calcular_horas_normais_aritimética(self):
+        """Teste unitário de cálculo aritmético de jornada normal de 8 horas."""
         entrada = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
         saida = datetime.now().replace(hour=17, minute=0, second=0, microsecond=0)
         pausa_inicio = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
@@ -46,8 +50,8 @@ class TestUnitCalculoHoras:
         assert horas_trabalhadas == timedelta(hours=8)
         assert horas_extras == timedelta(0)
 
-    def test_calcular_horas_extras(self):
-        """Teste unitário de cálculo de jornada com 2 horas extras."""
+    def test_calcular_horas_extras_aritimética(self):
+        """Teste unitário de cálculo aritmético de jornada com 2 horas extras."""
         entrada = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
         saida = datetime.now().replace(hour=19, minute=0, second=0, microsecond=0)
         pausa_inicio = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
@@ -64,11 +68,14 @@ class TestUnitCalculoHoras:
         assert horas_extras == timedelta(hours=2)
 
     def test_comprovante_hash_and_coordinates(self):
-        """Teste unitário de utilitários de marcação de ponto."""
-        from app.services.timekeeping import comprovante_hash, has_coordinates
+        """Teste unitário de funções reais do módulo app.services.timekeeping (STG.1-PLAN-06)."""
+        from app.services.timekeeping import comprovante_hash, has_coordinates, point_geom
 
         assert has_coordinates(-23.5505, -46.6333) is True
         assert has_coordinates(None, -46.6333) is False
+
+        geom = point_geom(-23.5505, -46.6333)
+        assert geom is not None
 
         u_id = uuid4()
         dt = datetime(2026, 10, 3, 8, 0, 0)
@@ -79,17 +86,17 @@ class TestUnitCalculoHoras:
 
 
 # ============================================================================
-# 2. IDENTIFICAÇÃO POSITIVA DE AMBIENTE STAGING (E2E-01)
+# 2. IDENTIFICAÇÃO POSITIVA DE AMBIENTE STAGING (E2E-01, STG.1-PLAN-05)
 # ============================================================================
 
 def verify_live_staging_server() -> bool:
     """
-    E2E-01: Valida positivamente se o servidor HTTP ativo é um ambiente Staging/Teste seguro.
-    Impede a execução dos testes E2E contra produção, inclusive via encaminhamento de porta ou túnel.
+    E2E-01 / STG.1-PLAN-05: Valida positivamente se o servidor HTTP ativo é um ambiente Staging seguro.
+    Verifica resposta do /health e impede execução contra produção ou alvos não autorizados.
     """
     health_url = STAGING_API_BASE_URL.replace("/api/v1", "/health")
     try:
-        with httpx.Client(timeout=2.0) as client:
+        with httpx.Client(timeout=3.0) as client:
             response = client.get(health_url)
             if response.status_code != 200:
                 return False
@@ -107,12 +114,12 @@ def verify_live_staging_server() -> bool:
 # Se o servidor HTTP de staging não estiver ativo ou não for um ambiente permitido, pula as suítes E2E
 e2e_live_server_available = verify_live_staging_server()
 e2e_skip_reason = (
-    "E2E-01: Servidor HTTP de Staging isolado (http://localhost:8000/health) não está ativo ou não é um ambiente seguro."
+    "E2E-01/STG.1-PLAN-05: Servidor HTTP de Staging isolado (http://localhost:8000/health) não está ativo ou não é um ambiente seguro."
 )
 
 
 # ============================================================================
-# 3. FIXTURES PARA TESTES E2E
+# 3. FIXTURES E CLIENTE HTTP PARA TESTES E2E
 # ============================================================================
 
 class StagingClient:
@@ -134,10 +141,16 @@ _CACHED_STAGING_TOKEN: str | None = None
 
 
 async def get_staging_token(client: StagingClient) -> str:
-    """Retorna token JWT autenticado para conta sintética de staging, reutilizando cache se disponível."""
+    """Retorna token JWT autenticado para conta sintética de staging (STG.1-PLAN-04)."""
     global _CACHED_STAGING_TOKEN
     if _CACHED_STAGING_TOKEN:
         return _CACHED_STAGING_TOKEN
+
+    if not STAGING_ADMIN_EMAIL or not STAGING_ADMIN_PASSWORD:
+        raise RuntimeError(
+            "Configuração ausente: STAGING_ADMIN_EMAIL e STAGING_ADMIN_PASSWORD são obrigatórias nas variáveis de ambiente."
+        )
+
     response = await client.post(
         "/auth/login",
         json={
@@ -148,7 +161,7 @@ async def get_staging_token(client: StagingClient) -> str:
     if response.status_code == 200:
         _CACHED_STAGING_TOKEN = response.json()["access_token"]
         return _CACHED_STAGING_TOKEN
-    raise RuntimeError(f"Falha ao obter token de staging: {response.status_code} - {response.text}")
+    raise RuntimeError(f"Falha na autenticação sintética E2E: Código {response.status_code}")
 
 
 @pytest.fixture
@@ -166,8 +179,11 @@ class TestE2EAuth:
     """Testes E2E de autenticação e gerenciamento de sessão em Staging."""
 
     @pytest.mark.asyncio
-    async def test_login_success(self, http_client: httpx.AsyncClient):
+    async def test_login_success(self, http_client: StagingClient):
         """Teste de login com credenciais sintéticas válidas."""
+        if not STAGING_ADMIN_EMAIL or not STAGING_ADMIN_PASSWORD:
+            pytest.fail("STAGING_ADMIN_EMAIL e STAGING_ADMIN_PASSWORD devem ser informadas nas variáveis de ambiente.")
+
         response = await http_client.post(
             "/auth/login",
             json={
@@ -183,7 +199,7 @@ class TestE2EAuth:
         assert data["token_type"] == "Bearer"
 
     @pytest.mark.asyncio
-    async def test_login_invalid_credentials(self, http_client: httpx.AsyncClient):
+    async def test_login_invalid_credentials(self, http_client: StagingClient):
         """Teste de login com credenciais sintéticas inválidas."""
         response = await http_client.post(
             "/auth/login",
@@ -196,7 +212,7 @@ class TestE2EAuth:
         assert response.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_login_missing_fields(self, http_client: httpx.AsyncClient):
+    async def test_login_missing_fields(self, http_client: StagingClient):
         """Teste de login sem campos obrigatórios."""
         response = await http_client.post(
             "/auth/login",
@@ -206,8 +222,9 @@ class TestE2EAuth:
         assert response.status_code == 422
 
     @pytest.mark.asyncio
-    async def test_refresh_token(self, http_client: httpx.AsyncClient):
+    async def test_refresh_token(self, http_client: StagingClient):
         """Teste de rotação e renovação de token de sessão."""
+        token = await get_staging_token(http_client)
         login_response = await http_client.post(
             "/auth/login",
             json={
@@ -228,18 +245,9 @@ class TestE2EAuth:
         assert "access_token" in refresh_response.json()
 
     @pytest.mark.asyncio
-    async def test_me_authenticated(self, http_client: httpx.AsyncClient):
+    async def test_me_authenticated(self, http_client: StagingClient):
         """Teste de obtenção de perfil do usuário autenticado."""
-        login_response = await http_client.post(
-            "/auth/login",
-            json={
-                "email": STAGING_ADMIN_EMAIL,
-                "password": STAGING_ADMIN_PASSWORD,
-            },
-        )
-        assert login_response.status_code == 200
-        token = login_response.json()["access_token"]
-
+        token = await get_staging_token(http_client)
         response = await http_client.get(
             "/auth/me",
             headers={"Authorization": f"Bearer {token}"},
@@ -251,7 +259,7 @@ class TestE2EAuth:
         assert data["email"] == STAGING_ADMIN_EMAIL
 
     @pytest.mark.asyncio
-    async def test_me_unauthenticated(self, http_client: httpx.AsyncClient):
+    async def test_me_unauthenticated(self, http_client: StagingClient):
         """Teste de acesso não autenticado (deve falhar com 401)."""
         response = await http_client.get("/auth/me")
         assert response.status_code == 401
@@ -271,7 +279,7 @@ class TestE2EReadOnlyQueries:
         return {"Authorization": f"Bearer {token}"}
 
     @pytest.mark.asyncio
-    async def test_list_usuarios(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_list_usuarios(self, http_client: StagingClient, auth_headers):
         """Teste de listagem de usuários."""
         response = await http_client.get("/usuarios", headers=auth_headers)
 
@@ -282,7 +290,7 @@ class TestE2EReadOnlyQueries:
         assert isinstance(data["items"], list)
 
     @pytest.mark.asyncio
-    async def test_list_usuarios_pagination(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_list_usuarios_pagination(self, http_client: StagingClient, auth_headers):
         """Teste de paginação de usuários."""
         response = await http_client.get(
             "/usuarios",
@@ -295,7 +303,7 @@ class TestE2EReadOnlyQueries:
         assert len(data["items"]) <= 5
 
     @pytest.mark.asyncio
-    async def test_get_usuario(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_get_usuario(self, http_client: StagingClient, auth_headers):
         """Teste de busca de usuário por ID."""
         list_response = await http_client.get("/usuarios", headers=auth_headers)
         users = list_response.json()["items"]
@@ -308,7 +316,7 @@ class TestE2EReadOnlyQueries:
             assert response.json()["id"] == user_id
 
     @pytest.mark.asyncio
-    async def test_list_equipes(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_list_equipes(self, http_client: StagingClient, auth_headers):
         """Teste de listagem de equipes."""
         response = await http_client.get("/equipes", headers=auth_headers)
 
@@ -317,7 +325,7 @@ class TestE2EReadOnlyQueries:
         assert "items" in data
 
     @pytest.mark.asyncio
-    async def test_list_marcacoes(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_list_marcacoes(self, http_client: StagingClient, auth_headers):
         """Teste de listagem de marcações."""
         today = date.today().isoformat()
         response = await http_client.get(
@@ -331,7 +339,7 @@ class TestE2EReadOnlyQueries:
         assert "items" in data
 
     @pytest.mark.asyncio
-    async def test_espelho_ponto(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_espelho_ponto(self, http_client: StagingClient, auth_headers):
         """Teste de consulta de espelho de ponto."""
         inicio = date.today().replace(day=1).isoformat()
         fim = date.today().isoformat()
@@ -348,7 +356,7 @@ class TestE2EReadOnlyQueries:
         assert response.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_list_escalas(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_list_escalas(self, http_client: StagingClient, auth_headers):
         """Teste de listagem de escalas."""
         response = await http_client.get("/escalas", headers=auth_headers)
 
@@ -357,7 +365,7 @@ class TestE2EReadOnlyQueries:
         assert "items" in data
 
     @pytest.mark.asyncio
-    async def test_dashboard_stats(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_dashboard_stats(self, http_client: StagingClient, auth_headers):
         """Teste de estatísticas do dashboard."""
         response = await http_client.get("/dashboard/stats", headers=auth_headers)
 
@@ -367,7 +375,7 @@ class TestE2EReadOnlyQueries:
 
 
 # ============================================================================
-# 6. SUÍTE E2E: OPERAÇÕES DE MUTAÇÃO / CRIAÇÃO (E2E-03)
+# 6. SUÍTE E2E: OPERAÇÕES DE MUTAÇÃO / CRIAÇÃO (E2E-03, STG.1-PLAN-05)
 # ============================================================================
 
 @pytest.mark.skipif(not e2e_live_server_available, reason=e2e_skip_reason)
@@ -380,7 +388,7 @@ class TestE2EMutations:
         return {"Authorization": f"Bearer {token}"}
 
     @pytest.mark.asyncio
-    async def test_create_equipe(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_create_equipe(self, http_client: StagingClient, auth_headers):
         """Teste E2E de criação de equipe em Staging."""
         response = await http_client.post(
             "/equipes",
@@ -397,7 +405,7 @@ class TestE2EMutations:
         assert "nome" in data
 
     @pytest.mark.asyncio
-    async def test_create_escala(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_create_escala(self, http_client: StagingClient, auth_headers):
         """Teste E2E de criação de escala em Staging."""
         response = await http_client.post(
             "/escalas",
@@ -420,7 +428,7 @@ class TestE2EMutations:
         assert "id" in data
 
     @pytest.mark.asyncio
-    async def test_cpf_invalid_format(self, http_client: httpx.AsyncClient, auth_headers):
+    async def test_cpf_invalid_format(self, http_client: StagingClient, auth_headers):
         """Teste E2E de rejeição de CPF com formato inválido."""
         response = await http_client.post(
             "/usuarios",
@@ -437,7 +445,7 @@ class TestE2EMutations:
 
 
 # ============================================================================
-# 7. SUÍTE E2E: RATE LIMITING E CARGA (E2E-03)
+# 7. SUÍTE E2E: RATE LIMITING E CARGA (E2E-03, STG.1-PLAN-05)
 # ============================================================================
 
 @pytest.mark.skipif(not e2e_live_server_available, reason=e2e_skip_reason)
@@ -445,7 +453,7 @@ class TestE2ERateLimiting:
     """Testes E2E de rate limiting com critério estrito de aprovação (E2E-03)."""
 
     @pytest.mark.asyncio
-    async def test_rate_limit_not_exceeded(self, http_client: httpx.AsyncClient):
+    async def test_rate_limit_not_exceeded(self, http_client: StagingClient):
         """Teste de requisições normais dentro do limite."""
         for _ in range(5):
             response = await http_client.get("../../health")
@@ -453,7 +461,7 @@ class TestE2ERateLimiting:
 
     @pytest.mark.asyncio
     @pytest.mark.slow
-    async def test_rate_limit_exceeded(self, http_client: httpx.AsyncClient):
+    async def test_rate_limit_exceeded(self, http_client: StagingClient):
         """
         E2E-03: Teste de rate limit excedido.
         Critério estrito: confirma que requisições acima do limite disparam HTTP 429 Too Many Requests.
