@@ -151,7 +151,11 @@ app.include_router(tenant_router, prefix="/api/v1")
 @app.get("/health")
 async def health_check():
     """Liveness check endpoint."""
-    return {"status": "ok", "version": settings.app_version}
+    return {
+        "status": "ok",
+        "version": settings.app_version,
+        "environment": settings.environment,
+    }
 
 
 @app.get("/ready")
