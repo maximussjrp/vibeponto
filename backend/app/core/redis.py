@@ -159,22 +159,48 @@ class RedisClient:
     # Password Reset Tokens
     # =========================================================================
 
+    @staticmethod
+    def _parse_password_reset_data(data: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+        """Extrai (user_id, credential_fingerprint) do payload do token.
+
+        Tokens legados (valor = user_id puro) retornam fingerprint None e não podem
+        ser confirmados, pois não carregam vínculo com o estado da credencial.
+        """
+        if not data:
+            return None, None
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, dict) and "user_id" in parsed:
+                return str(parsed["user_id"]), parsed.get("credential_fingerprint")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return str(data), None
+
     async def store_password_reset_token(
         self,
         user_id: str,
         token: str,
         ttl_seconds: int = 3600,
+        credential_fingerprint: Optional[str] = None,
     ) -> None:
-        """Armazena token de reset de senha (1h padrão)."""
-        await self.client.setex(f"password_reset:{token}", ttl_seconds, user_id)
+        """Armazena token de reset vinculado ao fingerprint da credencial na emissão (USR-43)."""
+        if credential_fingerprint:
+            val = json.dumps({"user_id": str(user_id), "credential_fingerprint": credential_fingerprint})
+        else:
+            val = str(user_id)
+        await self.client.setex(f"password_reset:{token}", ttl_seconds, val)
 
     async def peek_password_reset_user(self, token: str) -> Optional[str]:
         """Consulta user_id pelo token de reset sem consumi-lo (operação GET pura)."""
-        return await self.client.get(f"password_reset:{token}")
+        raw = await self.client.get(f"password_reset:{token}")
+        user_id, _ = self._parse_password_reset_data(raw)
+        return user_id
 
     async def consume_password_reset_user(self, token: str) -> Optional[str]:
         """Obtém e consome user_id pelo token de reset em operação atômica (GETDEL)."""
-        return await self.client.getdel(f"password_reset:{token}")
+        raw = await self.client.getdel(f"password_reset:{token}")
+        user_id, _ = self._parse_password_reset_data(raw)
+        return user_id
 
     async def get_password_reset_user(self, token: str) -> Optional[str]:
         """Consulta user_id pelo token de reset sem consumi-lo (GET - alias de peek)."""
@@ -188,25 +214,37 @@ class RedisClient:
         self,
         token: str,
         lock_ttl_seconds: int = 30,
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """
-        Reserva o token de reset atomicamente sob concorrência (USR-43).
+        Reserva o token de reset atomicamente via Lua sob concorrência (USR-43).
+        GET do token e SET NX EX da trava executam no mesmo script, sem janela entre eles.
+        Retorna: (user_id, lock_id, credential_fingerprint)
         """
-        user_id = await self.client.get(f"password_reset:{token}")
-        if not user_id:
-            return None, None
-
         lock_id = secrets.token_hex(16)
-        acquired = await self.client.set(
+        script = """
+        local val = redis.call("GET", KEYS[1])
+        if not val then
+            return nil
+        end
+        local acquired = redis.call("SET", KEYS[2], ARGV[1], "NX", "EX", ARGV[2])
+        if not acquired then
+            return nil
+        end
+        return val
+        """
+        raw_val = await self.client.eval(
+            script,
+            2,
+            f"password_reset:{token}",
             f"password_reset_lock:{token}",
             lock_id,
-            nx=True,
-            ex=lock_ttl_seconds,
+            lock_ttl_seconds,
         )
-        if not acquired:
-            return None, None
+        if not raw_val:
+            return None, None, None
 
-        return user_id, lock_id
+        user_id, fingerprint = self._parse_password_reset_data(raw_val)
+        return user_id, lock_id, fingerprint
 
     async def release_password_reset_lock(self, token: str, lock_id: str) -> bool:
         """
@@ -222,17 +260,28 @@ class RedisClient:
         result = await self.client.eval(script, 1, f"password_reset_lock:{token}", lock_id)
         return bool(result)
 
-    async def finalize_password_reset(self, token: str, lock_id: str, user_id: str) -> bool:
+    async def finalize_password_reset(self, token: str, lock_id: str) -> bool:
         """
-        Finaliza a redefinição de senha (USR-43):
-        1. Consome o token no Redis.
-        2. Libera a trava de concorrência.
-        3. Revoga todas as sessões ativas do usuário.
+        Finaliza a redefinição de senha via Lua atômico (USR-43):
+        Consome o token e libera a trava SOMENTE se o lock_id for o proprietário.
         """
-        await self.consume_password_reset_user(token)
-        await self.release_password_reset_lock(token, lock_id)
-        await self.revoke_all_user_sessions(user_id)
-        return True
+        script = """
+        if redis.call("GET", KEYS[1]) == ARGV[1] then
+            redis.call("DEL", KEYS[2])
+            redis.call("DEL", KEYS[1])
+            return 1
+        else
+            return 0
+        end
+        """
+        result = await self.client.eval(
+            script,
+            2,
+            f"password_reset_lock:{token}",
+            f"password_reset:{token}",
+            lock_id,
+        )
+        return bool(result)
 
     # =========================================================================
     # Session Management

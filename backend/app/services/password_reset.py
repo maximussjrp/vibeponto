@@ -6,6 +6,7 @@ from uuid import UUID
 
 from app.core.email import email_service
 from app.core.redis import get_redis
+from app.core.security import credential_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ async def execute_password_reset_request(
     user_id: UUID | str,
     email: str,
     nome: str,
+    password_hash: str | None = None,
     redis=None,
 ) -> str:
     """
@@ -42,6 +44,7 @@ async def execute_password_reset_request(
         user_id=str_user_id,
         token=token,
         ttl_seconds=3600,
+        credential_fingerprint=credential_fingerprint(password_hash) if password_hash else None,
     )
 
     try:

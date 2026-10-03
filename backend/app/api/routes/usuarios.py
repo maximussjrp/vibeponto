@@ -537,6 +537,7 @@ async def admin_reset_password(
             user_id=str(usuario.id),
             email=usuario.email,
             nome=usuario.nome,
+            password_hash=usuario.password_hash,
         )
     except PasswordResetEmailError as exc:
         raise HTTPException(

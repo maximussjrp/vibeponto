@@ -32,6 +32,15 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
+def credential_fingerprint(password_hash: str) -> str:
+    """SHA-256 hex do hash atual; versão opaca da credencial (USR-43).
+
+    bcrypt usa salt aleatório, então toda troca de senha gera um fingerprint novo.
+    Equivale em SQL a encode(sha256(convert_to(password_hash, 'UTF8')), 'hex').
+    """
+    return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()
+
+
 def create_access_token(
     data: dict[str, Any],
     expires_delta: timedelta | None = None,
