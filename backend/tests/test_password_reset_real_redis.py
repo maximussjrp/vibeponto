@@ -32,38 +32,27 @@ TEST_REDIS_URL = os.getenv(
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
+from tests.destructive_guard import (
+    UnsafeTestEnvironment,
+    destructive_testing_allowed,
+    verify_disposable_environment,
+)
+
+
 def assert_safe_test_environment() -> None:
     """
     OPS-04: Valida estritamente se os alvos de teste são ambientes dedicados e descartáveis.
     Aborta com pytest.skip antes de executar qualquer DROP SCHEMA ou FLUSHDB.
     """
-    allow_destructive = os.getenv("ALLOW_DESTRUCTIVE_TESTING", "true").lower()
-    if allow_destructive not in ("true", "1", "yes"):
-        pytest.skip("OPS-04: Testes destrutivos desativados via ALLOW_DESTRUCTIVE_TESTING.")
+    if not destructive_testing_allowed(os.environ):
+        pytest.skip("OPS-04: Testes destrutivos desativados via ALLOW_DESTRUCTIVE_TESTING (padrão: false).")
 
-    # Validar URL do PostgreSQL
-    db_url = TEST_DATABASE_URL.lower()
-    is_safe_db = (
-        ("54399" in db_url or "test" in db_url)
-        and ("localhost" in db_url or "127.0.0.1" in db_url or "test_pg" in db_url)
-        and not ("production" in db_url or "prod_vibeponto" in db_url)
-    )
-    if not is_safe_db:
-        pytest.skip(
-            f"OPS-04: Conexão PostgreSQL potencialmente perigosa/compartilhada negada: {TEST_DATABASE_URL}"
-        )
-
-    # Validar URL do Redis
-    redis_url = TEST_REDIS_URL.lower()
-    is_safe_redis = (
-        ("56379" in redis_url or "test" in redis_url)
-        and ("localhost" in redis_url or "127.0.0.1" in redis_url or "test_redis" in redis_url)
-        and not ("production" in redis_url or "prod_redis" in redis_url)
-    )
-    if not is_safe_redis:
-        pytest.skip(
-            f"OPS-04: Conexão Redis potencialmente perigosa/compartilhada negada: {TEST_REDIS_URL}"
-        )
+    try:
+        asyncio.run(verify_disposable_environment(TEST_DATABASE_URL, TEST_REDIS_URL, os.environ))
+    except UnsafeTestEnvironment as exc:
+        pytest.skip(f"OPS-04: Ambiente de teste não seguro ou não autorizado: {exc}")
+    except Exception as exc:
+        pytest.skip(f"OPS-04: Erro ao verificar ambiente de teste: {exc}")
 
 
 @pytest.fixture(autouse=True)
@@ -103,11 +92,16 @@ async def raw_redis():
     """
     pool = aioredis.ConnectionPool.from_url(TEST_REDIS_URL, decode_responses=True)
     client = aioredis.Redis(connection_pool=pool)
+    env_id = os.getenv("VIBEPONTO_DISPOSABLE_ENV_ID")
     await client.flushdb()
+    if env_id:
+        await client.set("__vibeponto_disposable_test_env__", env_id)
     try:
         yield client
     finally:
         await client.flushdb()
+        if env_id:
+            await client.set("__vibeponto_disposable_test_env__", env_id)
         await pool.disconnect()
 
 
@@ -205,7 +199,9 @@ async def test_full_password_reset_flow_with_real_redis(db_session_factory, raw_
 
                 # 3. Confirmar que o token CONTINUA no Redis (PEEK não destrutivo)
                 val_after_verify = await raw_redis.get(f"password_reset:{captured_token}")
-                assert val_after_verify == str(user_id), "PEEK não pode consumir o token!"
+                user_id_in_redis, fingerprint_in_redis = RedisClient._parse_password_reset_data(val_after_verify)
+                assert user_id_in_redis == str(user_id), "PEEK não pode consumir o token!"
+                assert fingerprint_in_redis is not None, "Token deve conter o fingerprint da credencial na emissão"
 
                 # 4. Confirmar a redefinição de senha
                 res_conf = await client.post("/api/v1/auth/password/reset/confirm", json={
@@ -397,7 +393,8 @@ async def test_password_reset_db_failure_retains_token_in_redis(db_session_facto
 
                 # Verificar que o token CONTINUA no Redis intacto
                 token_val_after_fail = await raw_redis.get(f"password_reset:{captured_token}")
-                assert token_val_after_fail == str(user_id), "Token não pode ser consumido quando o banco falha!"
+                user_id_fail, _ = RedisClient._parse_password_reset_data(token_val_after_fail)
+                assert user_id_fail == str(user_id), "Token não pode ser consumido quando o banco falha!"
 
                 # E a trava de concorrência foi liberada
                 lock_val = await raw_redis.get(f"password_reset_lock:{captured_token}")
