@@ -53,14 +53,14 @@ async def list_usuarios(
 ):
     """
     Listar usuários do tenant.
-    
+
     - Gestores e Admins podem ver todos
     - Colaboradores veem apenas colegas da mesma equipe
     """
     # Base query
     query = select(Usuario).where(Usuario.tenant_id == tenant.tenant_id)
     count_query = select(func.count(Usuario.id)).where(Usuario.tenant_id == tenant.tenant_id)
-    
+
     # Colaboradores só veem sua equipe (ou apenas a si próprios se sem equipe)
     if current_user.papel == UserRole.COLABORADOR:
         result = await db.execute(
@@ -73,20 +73,20 @@ async def list_usuarios(
         else:
             query = query.where(Usuario.id == current_user.id)
             count_query = count_query.where(Usuario.id == current_user.id)
-    
+
     # Filtros
     if status_filter:
         query = query.where(Usuario.status == status_filter)
         count_query = count_query.where(Usuario.status == status_filter)
-    
+
     if papel_filter:
         query = query.where(Usuario.papel == papel_filter)
         count_query = count_query.where(Usuario.papel == papel_filter)
-    
+
     if equipe_id:
         query = query.where(Usuario.equipe_id == equipe_id)
         count_query = count_query.where(Usuario.equipe_id == equipe_id)
-    
+
     if q:
         search = f"%{q}%"
         query = query.where(
@@ -99,18 +99,18 @@ async def list_usuarios(
             (Usuario.email.ilike(search)) |
             (Usuario.matricula.ilike(search))
         )
-    
+
     # Contagem total
     total_result = await db.execute(count_query)
     total = total_result.scalar_one()
-    
+
     # Paginação
     query = query.offset((page - 1) * per_page).limit(per_page)
     query = query.order_by(Usuario.nome)
-    
+
     result = await db.execute(query)
     usuarios = result.scalars().all()
-    
+
     if current_user.papel == UserRole.COLABORADOR:
         items = [UsuarioMinimalColaborador.model_validate(u) for u in usuarios]
     elif current_user.papel in (UserRole.GESTOR, UserRole.FINANCEIRO):
@@ -136,7 +136,7 @@ async def create_usuario(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Criar novo usuário (apenas Admin)."""
-    
+
     # Verificar email único no tenant
     result = await db.execute(
         select(Usuario).where(
@@ -149,7 +149,7 @@ async def create_usuario(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email já cadastrado",
         )
-    
+
     # Verificar CPF único no tenant
     result = await db.execute(
         select(Usuario).where(
@@ -162,7 +162,7 @@ async def create_usuario(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="CPF já cadastrado",
         )
-    
+
     # Verificar matrícula única no tenant
     result = await db.execute(
         select(Usuario).where(
@@ -175,7 +175,7 @@ async def create_usuario(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Matrícula já cadastrada",
         )
-    
+
     # Verificar equipe existe
     if data.equipe_id:
         result = await db.execute(
@@ -189,7 +189,7 @@ async def create_usuario(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Equipe não encontrada",
             )
-    
+
     # Criar usuário
     usuario = Usuario(
         tenant_id=tenant.tenant_id,
@@ -203,11 +203,11 @@ async def create_usuario(
         status=UserStatus.ACTIVE,
         equipe_id=data.equipe_id,
     )
-    
+
     db.add(usuario)
     await db.commit()
     await db.refresh(usuario)
-    
+
     return UsuarioRead.model_validate(usuario)
 
 
@@ -219,7 +219,7 @@ async def get_usuario(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Obter usuário por ID."""
-    
+
     result = await db.execute(
         select(Usuario).where(
             Usuario.id == usuario_id,
@@ -227,13 +227,13 @@ async def get_usuario(
         )
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     # Colaborador só pode ver a si mesmo ou colegas da equipe
     if current_user.papel == UserRole.COLABORADOR:
         if usuario.id != current_user.id:
@@ -242,13 +242,13 @@ async def get_usuario(
                 select(Usuario.equipe_id).where(Usuario.id == current_user.id)
             )
             current_equipe = user_result.scalar_one_or_none()
-            
+
             if current_equipe is None or usuario.equipe_id != current_equipe:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Acesso negado",
                 )
-    
+
     if current_user.papel == UserRole.COLABORADOR:
         return UsuarioMinimalColaborador.model_validate(usuario)
     elif current_user.papel in (UserRole.GESTOR, UserRole.FINANCEIRO):
@@ -269,7 +269,7 @@ async def update_usuario(
 ):
     """
     Atualizar usuário.
-    
+
     - Admin pode alterar qualquer campo
     - Gestor pode alterar apenas colaboradores de sua equipe (não papel/status)
     """
@@ -280,13 +280,13 @@ async def update_usuario(
         )
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     # Se for GESTOR: apenas colaboradores, validar equipe de origem E destino (atividades ativas)
     if current_user.papel == UserRole.GESTOR:
         if usuario.papel != UserRole.COLABORADOR:
@@ -299,13 +299,13 @@ async def update_usuario(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Apenas Admin pode alterar papel e status",
             )
-            
+
         if usuario.equipe_id is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Gestor só pode alterar usuários de sua própria equipe",
             )
-            
+
         res_orig = await db.execute(
             select(Equipe).where(
                 Equipe.id == usuario.equipe_id,
@@ -318,7 +318,7 @@ async def update_usuario(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Gestor só pode alterar usuários de sua própria equipe ativa",
             )
-            
+
         if data.equipe_id is not None and data.equipe_id != usuario.equipe_id:
             res_dest = await db.execute(
                 select(Equipe).where(
@@ -351,7 +351,7 @@ async def update_usuario(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Equipe não encontrada",
             )
-    
+
     role_changed = data.papel is not None and data.papel != usuario.papel
 
     # Atualizar campos
@@ -364,12 +364,12 @@ async def update_usuario(
         )
         await db.commit()
         await db.refresh(usuario)
-        
+
     if role_changed:
         from app.core.redis import get_redis
         redis = await get_redis()
         await redis.revoke_all_user_sessions(str(usuario_id))
-    
+
     if current_user.papel == UserRole.COLABORADOR:
         return UsuarioMinimalColaborador.model_validate(usuario)
     elif current_user.papel in (UserRole.GESTOR, UserRole.FINANCEIRO):
@@ -389,7 +389,7 @@ async def delete_usuario(
 ):
     """
     Desativar usuário (soft delete).
-    
+
     Por LGPD, não deletamos permanentemente.
     """
     result = await db.execute(
@@ -399,20 +399,20 @@ async def delete_usuario(
         )
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     # Não pode desativar a si mesmo
     if usuario.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Não é possível desativar seu próprio usuário",
         )
-    
+
     # Soft delete (inativar)
     await db.execute(
         update(Usuario)
@@ -420,11 +420,11 @@ async def delete_usuario(
         .values(status=UserStatus.INACTIVE)
     )
     await db.commit()
-    
+
     from app.core.redis import get_redis
     redis = await get_redis()
     await redis.revoke_all_user_sessions(str(usuario_id))
-    
+
     return SuccessResponse(message="Usuário desativado com sucesso")
 
 
@@ -436,7 +436,7 @@ async def reactivate_usuario(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Reativar usuário."""
-    
+
     result = await db.execute(
         select(Usuario).where(
             Usuario.id == usuario_id,
@@ -444,13 +444,13 @@ async def reactivate_usuario(
         )
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     await db.execute(
         update(Usuario)
         .where(Usuario.id == usuario_id)
@@ -458,7 +458,7 @@ async def reactivate_usuario(
     )
     await db.commit()
     await db.refresh(usuario)
-    
+
     return UsuarioRead.model_validate(usuario)
 
 
@@ -477,19 +477,19 @@ async def suspend_usuario(
         )
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     if usuario.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Não é possível suspender seu próprio usuário",
         )
-    
+
     await db.execute(
         update(Usuario)
         .where(Usuario.id == usuario_id)
@@ -497,11 +497,11 @@ async def suspend_usuario(
     )
     await db.commit()
     await db.refresh(usuario)
-    
+
     from app.core.redis import get_redis
     redis = await get_redis()
     await redis.revoke_all_user_sessions(str(usuario_id))
-    
+
     return UsuarioRead.model_validate(usuario)
 
 
@@ -514,7 +514,7 @@ async def admin_reset_password(
 ):
     """
     Reset de senha pelo admin.
-    
+
     Gera token de recuperação seguro sem alterar password_hash diretamente.
     Retorna erro 502 explícito para o admin se o e-mail falhar.
     """
@@ -525,13 +525,13 @@ async def admin_reset_password(
         )
     )
     usuario = result.scalar_one_or_none()
-    
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
-    
+
     try:
         await execute_password_reset_request(
             user_id=str(usuario.id),
@@ -544,8 +544,7 @@ async def admin_reset_password(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         )
-    
+
     return SuccessResponse(
         message="Link de recuperação de senha gerado e enviado ao usuário."
     )
-

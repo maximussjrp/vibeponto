@@ -64,10 +64,10 @@ async def test_colaborador_sem_equipe_scenarios():
     tenant_id = uuid4()
     u1_id = uuid4()
     u2_id = uuid4()
-    
+
     colab_sem_equipe = MockUser(u1_id, tenant_id, UserRole.COLABORADOR, equipe_id=None, nome="Self")
     colab_outro = MockUser(u2_id, tenant_id, UserRole.COLABORADOR, equipe_id=None, nome="Other")
-    
+
     users_by_id = {
         u1_id: colab_sem_equipe,
         u2_id: colab_outro,
@@ -75,30 +75,30 @@ async def test_colaborador_sem_equipe_scenarios():
 
     async def override_user():
         return colab_sem_equipe
-        
+
     async def override_tenant():
         return MockTenantContext(tenant_id)
 
     async def fake_execute(statement, *args, **kwargs):
         compiled = str(statement).lower()
-        
+
         # Count query
         if "count(" in compiled:
             return FakeResult([colab_sem_equipe], scalar_val=1)
-            
+
         # Select single field equipe_id: select(Usuario.equipe_id)
         if "equipe_id" in compiled and "select usuarios.id" not in compiled and "from usuarios" in compiled and "select usuarios.tenant_id" not in compiled:
             return FakeResult([], scalar_val=None)
-            
+
         # Select full Usuario object
         params = getattr(statement, "compile", lambda: None)()
         param_dict = getattr(params, "params", {}) if params else {}
         target_id = param_dict.get("id_1") or param_dict.get("id")
-        
+
         if target_id and UUID(str(target_id)) in users_by_id:
             user_found = users_by_id[UUID(str(target_id))]
             return FakeResult([user_found], scalar_val=user_found)
-            
+
         return FakeResult([colab_sem_equipe], scalar_val=colab_sem_equipe)
 
     async def override_db():
@@ -117,12 +117,12 @@ async def test_colaborador_sem_equipe_scenarios():
         data = resp.json()
         assert data["total"] == 1
         assert data["items"][0]["id"] == str(u1_id)
-        
+
         # GET /api/v1/usuarios/{u1_id} (own profile) -> 200 OK
         resp_self = await client.get(f"/api/v1/usuarios/{u1_id}")
         assert resp_self.status_code == 200
         assert resp_self.json()["id"] == str(u1_id)
-        
+
         # GET /api/v1/usuarios/{u2_id} (other user without team) -> 403 Forbidden
         resp_other = await client.get(f"/api/v1/usuarios/{u2_id}")
         assert resp_other.status_code == 403
@@ -135,15 +135,15 @@ async def test_colaborador_com_equipe_scenarios():
     tenant_id = uuid4()
     equipe_id = uuid4()
     outra_equipe_id = uuid4()
-    
+
     u1_id = uuid4()
     u2_id = uuid4()
     u3_id = uuid4()
-    
+
     colab_equipe = MockUser(u1_id, tenant_id, UserRole.COLABORADOR, equipe_id=equipe_id, nome="Colab1")
     colab_colega = MockUser(u2_id, tenant_id, UserRole.COLABORADOR, equipe_id=equipe_id, nome="Teammate")
     colab_outra_equipe = MockUser(u3_id, tenant_id, UserRole.COLABORADOR, equipe_id=outra_equipe_id, nome="OutraEquipe")
-    
+
     users_by_id = {
         u1_id: colab_equipe,
         u2_id: colab_colega,
@@ -152,27 +152,27 @@ async def test_colaborador_com_equipe_scenarios():
 
     async def override_user():
         return colab_equipe
-        
+
     async def override_tenant():
         return MockTenantContext(tenant_id)
 
     async def fake_execute(statement, *args, **kwargs):
         compiled = str(statement).lower()
-        
+
         if "count(" in compiled:
             return FakeResult([colab_equipe, colab_colega], scalar_val=2)
-            
+
         if "equipe_id" in compiled and "select usuarios.id" not in compiled and "from usuarios" in compiled and "select usuarios.tenant_id" not in compiled:
             return FakeResult([], scalar_val=equipe_id)
-            
+
         params = getattr(statement, "compile", lambda: None)()
         param_dict = getattr(params, "params", {}) if params else {}
         target_id = param_dict.get("id_1") or param_dict.get("id")
-        
+
         if target_id and UUID(str(target_id)) in users_by_id:
             user_found = users_by_id[UUID(str(target_id))]
             return FakeResult([user_found], scalar_val=user_found)
-            
+
         return FakeResult([colab_equipe, colab_colega], scalar_val=colab_equipe)
 
     async def override_db():
@@ -188,7 +188,7 @@ async def test_colaborador_com_equipe_scenarios():
         # GET /api/v1/usuarios/{u2_id} (teammate) -> 200 OK
         resp_teammate = await client.get(f"/api/v1/usuarios/{u2_id}")
         assert resp_teammate.status_code == 200
-        
+
         # GET /api/v1/usuarios/{u3_id} (other team) -> 403 Forbidden
         resp_other = await client.get(f"/api/v1/usuarios/{u3_id}")
         assert resp_other.status_code == 403

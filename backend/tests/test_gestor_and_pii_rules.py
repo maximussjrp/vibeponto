@@ -160,7 +160,7 @@ async def test_gestor_team_scope_validation():
     tenant_id = uuid4()
     gestor_id = uuid4()
     other_gestor_id = uuid4()
-    
+
     eq1_id = uuid4() # led by gestor_id
     eq2_id = uuid4() # led by other_gestor_id
 
@@ -186,7 +186,7 @@ async def test_gestor_team_scope_validation():
             if target_id and UUID(str(target_id)) == eq2_id:
                 return FakeResult([eq2], scalar_val=eq2)
             return FakeResult([eq1], scalar_val=eq1)
-            
+
         return FakeResult([u_other_team], scalar_val=u_other_team)
 
     async def override_db():

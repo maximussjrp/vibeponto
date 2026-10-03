@@ -854,4 +854,3 @@ async def update_current_user_info(
         await db.refresh(usuario)
 
     return UsuarioRead.model_validate(usuario)
-

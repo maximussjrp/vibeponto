@@ -415,3 +415,272 @@ async def test_password_reset_db_failure_retains_token_in_redis(db_session_facto
                 assert token_val_after_success is None
     finally:
         app.dependency_overrides.clear()
+
+
+async def test_password_reset_lock_expiration_and_fingerprint_guard(db_session_factory, raw_redis):
+    """
+    USR-43: Teste controlado em que a trava do Redis expira durante o processamento do SQL.
+    Garante que duas confirmações simultâneas (uma atrasada no SQL e outra disparada após a expiração da trava)
+    não corrompem o estado: a condição de fingerprint no UPDATE SQL impede que a requisição perdedora
+    sobrescreva a senha vencedora.
+    """
+    tenant_id = uuid4()
+    user_id = uuid4()
+    original_pass = "OriginalPassword123!"
+    pass_winner = "WinnerPassword123!"
+    pass_loser = "LoserPassword456!"
+
+    async with db_session_factory() as session:
+        tenant = Tenant(
+            id=tenant_id,
+            nome="Lock Expire Tenant",
+            cnpj="11223344000155",
+            email="lockexp@test.com",
+            ativo=True,
+        )
+        user = Usuario(
+            id=user_id,
+            tenant_id=tenant_id,
+            nome="Lock Expire User",
+            email="lockexp@test.com",
+            cpf="98765432100",
+            matricula="LOCK001",
+            password_hash=hash_password(original_pass),
+            papel=UserRole.COLABORADOR,
+            status=UserStatus.ACTIVE,
+        )
+        session.add(tenant)
+        session.add(user)
+        await session.commit()
+
+    async def normal_db_override():
+        async with db_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = normal_db_override
+    app.dependency_overrides[auth_rate_limit] = lambda: None
+
+    try:
+        with patch("app.core.email.email_service.send_password_reset", return_value=True):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                res_req = await client.post("/api/v1/auth/password/reset", json={"email": "lockexp@test.com"})
+                assert res_req.status_code == 200
+
+                keys = await raw_redis.keys("password_reset:*")
+                captured_token = keys[0].split("password_reset:")[1]
+
+                # Interceptar reserve_password_reset_token para usar TTL curto (1 seg) na trava
+                real_get_redis = get_redis
+                client_redis = await real_get_redis()
+                orig_reserve = client_redis.reserve_password_reset_token
+
+                async def short_ttl_reserve(token):
+                    return await orig_reserve(token, lock_ttl_seconds=1)
+
+                # Controlar o tempo do DB para Req A (espera 1.2s, executa no t=1.2s)
+                # e Req B (chega no t=1.1s após a trava expirar, mas espera 0.5s no DB para executar no t=1.6s)
+                exec_count = 0
+
+                async def timed_db_override():
+                    nonlocal exec_count
+                    async with db_session_factory() as session:
+                        orig_execute = session.execute
+
+                        async def delayed_execute(stmt, *args, **kwargs):
+                            nonlocal exec_count
+                            if "UPDATE" in str(stmt):
+                                exec_count += 1
+                                current_call = exec_count
+                                if current_call == 1:
+                                    # Req A: dorme 1.2s para que a trava Redis (1.0s TTL) expire antes de atualizar o DB
+                                    await asyncio.sleep(1.2)
+                                elif current_call == 2:
+                                    # Req B: dorme 0.5s para executar DEPOIS que a Req A tiver concluído seu UPDATE no DB
+                                    await asyncio.sleep(0.5)
+                            return await orig_execute(stmt, *args, **kwargs)
+
+                        session.execute = delayed_execute
+                        yield session
+
+                app.dependency_overrides[get_db] = timed_db_override
+
+                with patch.object(client_redis, "reserve_password_reset_token", side_effect=short_ttl_reserve):
+                    # Disparar Req A (vencedora)
+                    task_a = asyncio.create_task(
+                        client.post("/api/v1/auth/password/reset/confirm", json={
+                            "token": captured_token,
+                            "new_password": pass_winner,
+                            "confirm_password": pass_winner,
+                        })
+                    )
+
+                    # Aguardar 1.1s (garante que a trava do Redis de Req A expirou)
+                    await asyncio.sleep(1.1)
+
+                    # Disparar Req B (perdedora: consegue a trava que expirou, mas tentará o SQL após Req A ter atualizado)
+                    task_b = asyncio.create_task(
+                        client.post("/api/v1/auth/password/reset/confirm", json={
+                            "token": captured_token,
+                            "new_password": pass_loser,
+                            "confirm_password": pass_loser,
+                        })
+                    )
+
+                    res_a, res_b = await asyncio.gather(task_a, task_b)
+
+                # Req A deve vencer (200 OK)
+                assert res_a.status_code == 200, f"Req A deveria suceder, obteve {res_a.status_code}: {res_a.text}"
+
+                # Req B deve ser rejeitada pelo UPDATE condicional no SQL (400 Bad Request)
+                assert res_b.status_code == 400, f"Req B deveria ser rejeitada, obteve {res_b.status_code}: {res_b.text}"
+                assert "já utilizado" in res_b.json()["detail"] or "inválido" in res_b.json()["detail"]
+
+                # Verificar banco: apenas a senha da Req A foi gravada; a Req B NÃO sobrescreveu
+                async with db_session_factory() as session:
+                    user_db = await session.scalar(select(Usuario).where(Usuario.id == user_id))
+                    assert verify_password(pass_winner, user_db.password_hash), "Senha vencedora deve ter sido gravada"
+                    assert not verify_password(pass_loser, user_db.password_hash), "Senha perdedora NÃO pode sobrescrever a vencedora"
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_pending_session_revocation_full_lifecycle_and_redis_outage(db_session_factory, raw_redis):
+    """
+    USR-44: Teste completo de revogação pendente com falha de Redis:
+    1. Simula falha do Redis durante a revogação pós-commit do reset de senha.
+    2. Comprova que o marcador pending_session_revocation permanece em PostgreSQL (extra_data).
+    3. Comprova que rotas autenticadas respondem 503 fail-closed enquanto o Redis estiver indisponível.
+    4. Comprova que, após a recuperação do Redis, o validador de sessão revoga as sessões no Redis,
+       limpa o marcador no PostgreSQL e invalida a sessão antiga (401).
+    5. Comprova que o usuário consegue logar com a nova senha e acessar rotas normais.
+    """
+    tenant_id = uuid4()
+    user_id = uuid4()
+    original_pass = "OldPassRevoke123!"
+    new_pass = "NewPassRevoke123!"
+
+    async with db_session_factory() as session:
+        tenant = Tenant(
+            id=tenant_id,
+            nome="Revocation Tenant",
+            cnpj="99887766000144",
+            email="revoke@test.com",
+            ativo=True,
+        )
+        user = Usuario(
+            id=user_id,
+            tenant_id=tenant_id,
+            nome="Revocation User",
+            email="revoke@test.com",
+            cpf="98765432100",
+            matricula="REV001",
+            password_hash=hash_password(original_pass),
+            papel=UserRole.COLABORADOR,
+            status=UserStatus.ACTIVE,
+        )
+        session.add(tenant)
+        session.add(user)
+        await session.commit()
+
+    async def normal_db_override():
+        async with db_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = normal_db_override
+    app.dependency_overrides[auth_rate_limit] = lambda: None
+
+    try:
+        with patch("app.core.email.email_service.send_password_reset", return_value=True):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                # Emitir token de reset
+                res_req = await client.post("/api/v1/auth/password/reset", json={"email": "revoke@test.com"})
+                assert res_req.status_code == 200
+                keys = await raw_redis.keys("password_reset:*")
+                captured_token = keys[0].split("password_reset:")[1]
+
+                # Criar sessão ativa antes do reset (simulando token JWT ativo)
+                from app.core.sessions import issue_tokens
+                access_token_old, refresh_token_old, _ = await issue_tokens(user_id, tenant_id, "colaborador")
+
+                # Confirmar reset com simulação de falha de Redis na revogação de sessões
+                real_get_redis = get_redis
+                client_redis = await real_get_redis()
+
+                async def failing_revoke(uid):
+                    from redis.exceptions import RedisError
+                    raise RedisError("Simulated Redis outage during session revocation")
+
+                with patch.object(client_redis, "revoke_all_user_sessions", side_effect=failing_revoke):
+                    res_conf = await client.post("/api/v1/auth/password/reset/confirm", json={
+                        "token": captured_token,
+                        "new_password": new_pass,
+                        "confirm_password": new_pass,
+                    })
+
+                assert res_conf.status_code == 200
+                body = res_conf.json()
+                assert body["password_changed"] is True
+                assert body["sessions_revoked"] is False
+                assert body["session_revocation_pending"] is True
+
+                # 1. Verificar que o marcador durável foi gravado no PostgreSQL
+                async with db_session_factory() as session:
+                    user_db = await session.scalar(select(Usuario).where(Usuario.id == user_id))
+                    marker = user_db.extra_data.get("pending_session_revocation")
+                    assert marker is not None, "Marcador pending_session_revocation deve estar presente"
+
+                # 2. Simular tentativa de acesso com sessão antiga enquanto o Redis segue indisponível (fail-closed 503)
+                async def failing_get_redis():
+                    from redis.exceptions import RedisError
+                    raise RedisError("Redis unavailable")
+
+                with patch("app.core.sessions.get_redis", side_effect=failing_get_redis):
+                    res_protected_offline = await client.get(
+                        "/api/v1/auth/me",
+                        headers={"Authorization": f"Bearer {access_token_old}"},
+                    )
+                    assert res_protected_offline.status_code == 503
+                    assert "indisponível" in res_protected_offline.json()["detail"]
+
+                # O marcador continua gravado no PostgreSQL
+                async with db_session_factory() as session:
+                    user_db = await session.scalar(select(Usuario).where(Usuario.id == user_id))
+                    assert "pending_session_revocation" in user_db.extra_data
+
+                # 3. Redis recuperado: tentativa com sessão antiga aciona a revogação pendente e limpa o marcador
+                res_protected_recovery = await client.get(
+                    "/api/v1/auth/me",
+                    headers={"Authorization": f"Bearer {access_token_old}"},
+                )
+                assert res_protected_recovery.status_code == 401, "Sessão antiga deve ser desautorizada (401)"
+
+                # 4. Verificar que o marcador FOI REMOVIDO do PostgreSQL pós-revogação confirmada
+                async with db_session_factory() as session:
+                    user_db = await session.scalar(select(Usuario).where(Usuario.id == user_id))
+                    assert "pending_session_revocation" not in (user_db.extra_data or {})
+
+                # 5. Tentativa subsequente com a sessão antiga continua sendo rejeitada (401)
+                res_protected_subsequent = await client.get(
+                    "/api/v1/auth/me",
+                    headers={"Authorization": f"Bearer {access_token_old}"},
+                )
+                assert res_protected_subsequent.status_code == 401
+
+                # 6. Login com a NOVA senha funciona e cria nova sessão válida
+                res_login = await client.post("/api/v1/auth/login", json={
+                    "email": "revoke@test.com",
+                    "password": new_pass,
+                })
+                assert res_login.status_code == 200
+                new_access_token = res_login.json()["access_token"]
+
+                res_me_new = await client.get(
+                    "/api/v1/auth/me",
+                    headers={"Authorization": f"Bearer {new_access_token}"},
+                )
+                assert res_me_new.status_code == 200
+                assert res_me_new.json()["email"] == "revoke@test.com"
+    finally:
+        app.dependency_overrides.clear()

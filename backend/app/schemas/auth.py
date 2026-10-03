@@ -16,7 +16,7 @@ from app.schemas.base import BaseSchema, TimestampSchema
 
 class LoginRequest(BaseSchema):
     """Request de login."""
-    
+
     email: EmailStr
     tenant_id: Optional[UUID] = None
     password: str = Field(..., min_length=8)
@@ -32,7 +32,7 @@ class LoginRequest(BaseSchema):
 
 class LoginResponse(BaseSchema):
     """Response de login."""
-    
+
     access_token: str
     refresh_token: Optional[str] = None
     token_type: str = "Bearer"
@@ -43,13 +43,13 @@ class LoginResponse(BaseSchema):
 
 class RefreshTokenRequest(BaseSchema):
     """Request de refresh token."""
-    
+
     refresh_token: Optional[str] = None
 
 
 class TokenResponse(BaseSchema):
     """Response de token."""
-    
+
     access_token: str
     refresh_token: Optional[str] = None
     token_type: str = "Bearer"
@@ -58,11 +58,11 @@ class TokenResponse(BaseSchema):
 
 class PasswordChangeRequest(BaseSchema):
     """Request de troca de senha."""
-    
+
     current_password: str
     new_password: str = Field(..., min_length=8)
     confirm_password: str = Field(..., min_length=8)
-    
+
     @field_validator("confirm_password")
     @classmethod
     def passwords_match(cls, v: str, info) -> str:
@@ -73,7 +73,7 @@ class PasswordChangeRequest(BaseSchema):
 
 class PasswordResetRequest(BaseSchema):
     """Request de reset de senha."""
-    
+
     email: EmailStr
     tenant_id: Optional[UUID] = None
 
@@ -85,7 +85,7 @@ class PasswordResetRequest(BaseSchema):
 
 class PasswordResetConfirm(BaseSchema):
     """Confirmação de reset de senha."""
-    
+
     token: str
     new_password: str = Field(..., min_length=8)
     confirm_password: str = Field(..., min_length=8)
@@ -123,7 +123,7 @@ class PasswordResetVerifyRequest(BaseSchema):
 
 class MFASetupResponse(BaseSchema):
     """Response de setup MFA."""
-    
+
     secret: str
     qr_code_uri: str
     backup_codes: list[str]
@@ -131,13 +131,13 @@ class MFASetupResponse(BaseSchema):
 
 class MFAVerifyRequest(BaseSchema):
     """Request de verificação MFA."""
-    
+
     code: str = Field(..., min_length=6, max_length=6)
 
 
 class MFADisableRequest(BaseSchema):
     """Request para desabilitar MFA."""
-    
+
     password: str
     code: str = Field(..., min_length=6, max_length=32)
 
@@ -174,7 +174,7 @@ def sanitize_and_validate_cpf(v: Optional[str]) -> Optional[str]:
 
 class UsuarioBase(BaseSchema):
     """Schema base de usuário."""
-    
+
     nome: str = Field(..., min_length=2, max_length=255)
     email: EmailStr
     cpf: Optional[str] = Field(None, max_length=14)
@@ -194,7 +194,7 @@ class UsuarioBase(BaseSchema):
 
 class UsuarioCreate(UsuarioBase):
     """Schema para criar usuário."""
-    
+
     cpf: str = Field(..., min_length=11, max_length=14)
     password: str = Field(..., min_length=8)
     papel: UserRole = UserRole.COLABORADOR
@@ -214,7 +214,7 @@ class UsuarioCreate(UsuarioBase):
 
 class UsuarioUpdate(BaseSchema):
     """Schema para atualizar usuário."""
-    
+
     nome: Optional[str] = Field(None, min_length=2, max_length=255)
     telefone: Optional[str] = Field(None, max_length=20)
     equipe_id: Optional[UUID] = None
@@ -224,14 +224,14 @@ class UsuarioUpdate(BaseSchema):
 
 class UsuarioSelfUpdate(BaseSchema):
     """Schema de auto-serviço (próprio colaborador)."""
-    
+
     nome: Optional[str] = Field(None, min_length=2, max_length=255)
     telefone: Optional[str] = Field(None, max_length=20)
 
 
 class UsuarioRead(UsuarioBase, TimestampSchema):
     """Schema de leitura administrativa completa de usuário."""
-    
+
     id: UUID
     tenant_id: UUID
     papel: UserRole
@@ -244,7 +244,7 @@ class UsuarioRead(UsuarioBase, TimestampSchema):
 
 class UsuarioMinimal(BaseSchema):
     """Schema mínimo de usuário (para listas gerais)."""
-    
+
     id: UUID
     nome: str
     email: EmailStr
@@ -256,7 +256,7 @@ class UsuarioMinimal(BaseSchema):
 
 class UsuarioMinimalColaborador(BaseSchema):
     """Schema mínimo sanitizado para colaboradores (sem PII de contato/documentos)."""
-    
+
     id: UUID
     nome: str
     papel: UserRole
@@ -266,7 +266,7 @@ class UsuarioMinimalColaborador(BaseSchema):
 
 class UsuarioReadOperacional(BaseSchema):
     """Schema operacional mínimo e seguro para respostas de mutação (PATCH /usuarios/{id})."""
-    
+
     id: UUID
     tenant_id: UUID
     nome: str
@@ -287,7 +287,7 @@ class UsuarioReadGestor(UsuarioReadOperacional):
 
 class UsuarioReadAuditor(BaseSchema):
     """Schema de leitura para Auditores (CPF mascarado, sem segredos/MFA)."""
-    
+
     id: UUID
     tenant_id: UUID
     nome: str
@@ -324,7 +324,7 @@ class EquipeMembroMinimal(BaseSchema):
 
 class TenantBase(BaseSchema):
     """Schema base de tenant."""
-    
+
     nome: str = Field(..., min_length=2, max_length=255)
     cnpj: str = Field(..., min_length=14, max_length=18)
     email: EmailStr
@@ -338,10 +338,10 @@ class TenantBase(BaseSchema):
 
 class TenantCreate(TenantBase):
     """Schema para criar tenant."""
-    
+
     endereco: Optional[dict] = None
     config: Optional[dict] = None
-    
+
     # Admin inicial
     admin_nome: str = Field(..., min_length=2, max_length=255)
     admin_email: EmailStr
@@ -361,7 +361,7 @@ class TenantCreate(TenantBase):
 
 class TenantUpdate(BaseSchema):
     """Schema para atualizar tenant."""
-    
+
     nome: Optional[str] = Field(None, min_length=2, max_length=255)
     email: Optional[EmailStr] = None
     telefone: Optional[str] = Field(None, max_length=20)
@@ -376,7 +376,7 @@ class TenantUpdate(BaseSchema):
 
 class TenantRead(TenantBase, TimestampSchema):
     """Schema de leitura de tenant."""
-    
+
     id: UUID
     ativo: bool
     endereco: Optional[dict] = None
@@ -385,18 +385,18 @@ class TenantRead(TenantBase, TimestampSchema):
 
 class RegisterTenantRequest(BaseSchema):
     """Request de registro de novo tenant (SaaS)."""
-    
+
     # Empresa
     empresa_nome: str = Field(..., min_length=3, max_length=255)
     empresa_cnpj: str = Field(..., min_length=14, max_length=14)
     empresa_email: EmailStr
     empresa_telefone: Optional[str] = Field(None, max_length=20)
-    
+
     # Admin
     admin_nome: str = Field(..., min_length=3, max_length=255)
     admin_email: EmailStr
     admin_senha: str = Field(..., min_length=8)
-    
+
     # Plano
     plano: str = Field(default="professional")
 
@@ -408,7 +408,7 @@ class RegisterTenantRequest(BaseSchema):
 
 class RegisterTenantResponse(BaseSchema):
     """Response de registro de tenant."""
-    
+
     tenant_id: UUID
     tenant_slug: str
     admin_id: UUID
@@ -421,21 +421,21 @@ class RegisterTenantResponse(BaseSchema):
 
 class EquipeBase(BaseSchema):
     """Schema base de equipe."""
-    
+
     nome: str = Field(..., min_length=2, max_length=255)
     descricao: Optional[str] = None
 
 
 class EquipeCreate(EquipeBase):
     """Schema para criar equipe."""
-    
+
     lider_id: Optional[UUID] = None
     config: Optional[dict] = None
 
 
 class EquipeUpdate(BaseSchema):
     """Schema para atualizar equipe."""
-    
+
     nome: Optional[str] = Field(None, min_length=2, max_length=255)
     descricao: Optional[str] = None
     lider_id: Optional[UUID] = None
@@ -445,7 +445,7 @@ class EquipeUpdate(BaseSchema):
 
 class EquipeRead(EquipeBase, TimestampSchema):
     """Schema de leitura de equipe."""
-    
+
     id: UUID
     tenant_id: UUID
     lider_id: Optional[UUID] = None
@@ -457,7 +457,7 @@ from typing import Union
 
 class EquipeWithMembers(EquipeRead):
     """Schema de equipe com membros."""
-    
+
     membros: list[Union[UsuarioMinimal, EquipeMembroMinimal, UsuarioMinimalColaborador]] = []
 
 

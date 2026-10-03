@@ -15,12 +15,12 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    
+
     # 1. Pre-check for email case-insensitive collisions within the same tenant
     collision_check = bind.execute(sa.text("""
-        SELECT tenant_id, LOWER(email) as lower_email, COUNT(*) as cnt 
-        FROM usuarios 
-        GROUP BY tenant_id, LOWER(email) 
+        SELECT tenant_id, LOWER(email) as lower_email, COUNT(*) as cnt
+        FROM usuarios
+        GROUP BY tenant_id, LOWER(email)
         HAVING COUNT(*) > 1
     """)).fetchall()
 
@@ -66,4 +66,3 @@ def downgrade() -> None:
 
     # 3. Restore NOT NULL constraint on cpf column
     op.alter_column("usuarios", "cpf", existing_type=sa.String(14), nullable=False)
-
