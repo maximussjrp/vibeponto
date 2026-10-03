@@ -13,8 +13,27 @@ from alembic import command
 from app.core.database import Base
 
 import os
+import pytest
+from tests.destructive_guard import (
+    UnsafeTestEnvironment,
+    destructive_testing_allowed,
+    verify_disposable_environment,
+)
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:54399/test_vibeponto")
+TEST_REDIS_URL = os.getenv("TEST_REDIS_URL", "redis://localhost:56379/0")
+
+
+def assert_safe_test_environment() -> None:
+    """OPS-04: Valida estritamente se o banco é dedicado e descartável antes de drop_all."""
+    if not destructive_testing_allowed(os.environ):
+        pytest.skip("OPS-04: Testes destrutivos desativados via ALLOW_DESTRUCTIVE_TESTING (padrão: false).")
+    try:
+        asyncio.run(verify_disposable_environment(TEST_DATABASE_URL, TEST_REDIS_URL, os.environ))
+    except UnsafeTestEnvironment as exc:
+        pytest.skip(f"OPS-04: Ambiente de teste não seguro ou não autorizado: {exc}")
+    except Exception as exc:
+        pytest.skip(f"OPS-04: Erro ao verificar ambiente de teste: {exc}")
 
 
 async def reset_database():
@@ -35,6 +54,7 @@ async def current_version():
 
 
 def test_alembic_upgrade_head_on_empty_database(monkeypatch):
+    assert_safe_test_environment()
     asyncio.run(reset_database())
 
     monkeypatch.setattr(config_module.settings, "database_url", TEST_DATABASE_URL)

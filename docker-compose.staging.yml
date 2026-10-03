@@ -1,0 +1,119 @@
+services:
+  # ============================================================================
+  # POSTGRESQL DESCARTÁVEL DE STAGING (E2E-05)
+  # ============================================================================
+  staging-postgres:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: vibeponto-staging-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: test_vibeponto_staging
+    ports:
+      - "54399:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d test_vibeponto_staging"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - staging-network
+
+  # ============================================================================
+  # REDIS DESCARTÁVEL DE STAGING (E2E-05)
+  # ============================================================================
+  staging-redis:
+    image: redis:7-alpine
+    container_name: vibeponto-staging-redis
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - staging-network
+
+  # ============================================================================
+  # MINIO DESCARTÁVEL DE STAGING (E2E-05)
+  # ============================================================================
+  staging-minio:
+    image: elestio/minio:latest
+    container_name: vibeponto-staging-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: stagingstorage
+      MINIO_ROOT_PASSWORD: stagingstorage123
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - staging-network
+
+  # ============================================================================
+  # RABBITMQ DESCARTÁVEL DE STAGING (E2E-05)
+  # ============================================================================
+  staging-rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: vibeponto-staging-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: stagingmq
+      RABBITMQ_DEFAULT_PASS: stagingmq123
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - staging-network
+
+  # ============================================================================
+  # BACKEND API STAGING (E2E-05 - ENVIRONMENT=staging)
+  # ============================================================================
+  staging-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: dev
+    container_name: vibeponto-staging-api
+    environment:
+      ENVIRONMENT: staging
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@staging-postgres:5432/test_vibeponto_staging
+      REDIS_URL: redis://staging-redis:6379/0
+      SECRET_KEY: staging_secret_key_for_e2e_testing_min64chars_1234567890abcdef
+      MFA_ENCRYPTION_KEY: staging_mfa_encryption_key_32chars_123456
+      STORAGE_ENDPOINT: http://staging-minio:9000
+      STORAGE_ACCESS_KEY: stagingstorage
+      STORAGE_SECRET_KEY: stagingstorage123
+      STORAGE_BUCKET: test-vibeponto-staging
+      CELERY_BROKER_URL: amqp://stagingmq:stagingmq123@staging-rabbitmq:5672//
+      ALLOW_DESTRUCTIVE_TESTING: "true"
+      VIBEPONTO_DISPOSABLE_ENV_ID: "testenv_staging_e2e_1234567890abcdef"
+      DEBUG: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      staging-postgres:
+        condition: service_healthy
+      staging-redis:
+        condition: service_healthy
+      staging-minio:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    networks:
+      - staging-network
+
+networks:
+  staging-network:
+    driver: bridge
