@@ -41,12 +41,17 @@ export default function EsqueciSenhaPage() {
   const onSubmit = async (data: EmailForm) => {
     setIsLoading(true);
     try {
-      await api.post("/auth/esqueci-senha", data);
+      await api.post("/auth/password/reset", data);
       setIsSubmitted(true);
-    } catch (error) {
-      // Mesmo em caso de erro, mostrar sucesso por segurança
-      // (não revelar se o email existe ou não)
-      setIsSubmitted(true);
+    } catch (error: any) {
+      const status = error?.response?.status;
+      // Tratar falha de conexão ou erro interno do servidor (500/502/503/sem conexão)
+      if (!error?.response || status >= 500) {
+        toast.error("Não foi possível conectar ao servidor. Tente novamente mais tarde.");
+      } else {
+        // Para qualquer outra resposta da API, manter fluxo genérico (proteção contra enumeração)
+        setIsSubmitted(true);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -62,7 +67,7 @@ export default function EsqueciSenhaPage() {
                 <CheckCircle className="w-12 h-12 text-green-600 dark:text-green-400" />
               </div>
               
-              <h2 className="text-2xl font-bold">Email Enviado!</h2>
+              <h2 className="text-2xl font-bold">Solicitação Processada</h2>
               
               <p className="mt-2 text-muted-foreground">
                 Se o email <strong>{getValues("email")}</strong> estiver cadastrado em nosso sistema, 
@@ -100,6 +105,7 @@ export default function EsqueciSenhaPage() {
       </div>
     );
   }
+
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 p-4">

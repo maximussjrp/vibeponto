@@ -1,18 +1,25 @@
 """Revocable sessions: Redis stores identifiers and refresh hashes, never JWTs."""
 
 import hashlib
+import logging
 import time
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, Request, Response
 from redis.exceptions import RedisError
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import settings
 from app.core.redis import get_redis
 from app.core.security import create_access_token, create_refresh_token, decode_token
 
+logger = logging.getLogger(__name__)
+
 COOKIE_NAME = "vibeponto_refresh"
 COOKIE_PATH = "/api/v1/auth"
+# USR-44: chave em usuarios.extra_data que marca revogação de sessões ainda não confirmada no Redis.
+PENDING_REVOCATION_KEY = "pending_session_revocation"
 
 
 def unauthorized():
@@ -67,6 +74,46 @@ async def validate_session(token: str, expected_type: str):
     if not stored or (expected_type == "refresh" and stored != digest(token)):
         raise unauthorized()
     return payload
+
+
+async def clear_pending_session_revocation(db, user_id, marker: str) -> bool:
+    """Remove o marcador somente se ainda for o mesmo (não apaga marcador de reset mais recente)."""
+    result = await db.execute(
+        text(
+            "UPDATE usuarios SET extra_data = extra_data - CAST(:key AS text) "
+            "WHERE id = :user_id AND extra_data ->> CAST(:key AS text) = :marker"
+        ),
+        {"key": PENDING_REVOCATION_KEY, "user_id": user_id, "marker": marker},
+    )
+    await db.commit()
+    return result.rowcount == 1
+
+
+async def enforce_pending_session_revocation(db, usuario) -> None:
+    """USR-44: recuperação durável de revogação observada pelo validador de sessões.
+
+    Se a troca de senha foi persistida mas a revogação no Redis não foi confirmada,
+    qualquer uso de sessão do usuário dispara a revogação e é rejeitado. Se o Redis
+    seguir indisponível, responde 503 (fail-closed) e o marcador permanece.
+    """
+    extra = usuario.extra_data
+    marker = extra.get(PENDING_REVOCATION_KEY) if isinstance(extra, dict) else None
+    if not marker:
+        return
+    user_id = usuario.id
+    try:
+        client = await get_redis()
+        await client.revoke_all_user_sessions(str(user_id))
+    except RedisError:
+        logger.critical("SECURITY_ALERT pending session revocation still failing for user %s", user_id)
+        raise HTTPException(503, "Serviço de autenticação indisponível") from None
+    try:
+        await clear_pending_session_revocation(db, user_id, marker)
+        logger.warning("Pending session revocation recovered for user %s", user_id)
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.error("Sessions revoked but pending marker not cleared for user %s", user_id, exc_info=True)
+    raise unauthorized()
 
 
 async def issue_tokens(user_id, tenant_id, papel, previous=None):

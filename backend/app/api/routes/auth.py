@@ -1,18 +1,22 @@
 """Router de autenticação."""
 
 import logging
+import secrets
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import delete, select, update
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from redis.exceptions import RedisError
+from sqlalchemy import Text, case, cast, delete, func, literal_column, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, get_db
 from app.core.config import settings
 from app.core.observability import record_auth_attempt
 from app.core.rate_limit import auth_rate_limit
+from app.core.redis import RedisClient, get_redis
 from app.core.security import (
     encrypt_totp_secret,
     generate_totp_secret,
@@ -22,10 +26,13 @@ from app.core.security import (
 )
 from app.core.sessions import (
     COOKIE_NAME,
+    PENDING_REVOCATION_KEY,
     check_cookie_origin,
+    clear_pending_session_revocation,
     clear_refresh_cookie,
     cookie_mode,
     digest,
+    enforce_pending_session_revocation,
     issue_tokens,
     set_refresh_cookie,
     unauthorized,
@@ -40,15 +47,21 @@ from app.schemas import (
     MFAVerifyRequest,
     PasswordChangeRequest,
     PasswordResetConfirm,
+    PasswordResetConfirmResponse,
     PasswordResetRequest,
+    PasswordResetVerifyRequest,
+
     RefreshTokenRequest,
     RegisterTenantRequest,
     RegisterTenantResponse,
     SuccessResponse,
     TokenResponse,
     UsuarioRead,
+    UsuarioSelfUpdate,
 )
 from app.services.mfa import generate_backup_codes, replace_backup_codes, verify_mfa_code
+from app.services.password_reset import execute_password_reset_request, PasswordResetEmailError
+
 
 router = APIRouter(prefix="/auth", tags=["Autenticação"], dependencies=[Depends(auth_rate_limit)])
 logger = logging.getLogger(__name__)
@@ -203,7 +216,7 @@ async def register_tenant(
         tenant_id=tenant_id,
         nome=request.admin_nome,
         email=request.admin_email,
-        cpf="00000000000",  # CPF temporário - admin pode atualizar depois
+        cpf=None,  # CPF nulo - admin pode atualizar depois
         telefone=None,
         matricula=matricula,
         password_hash=hash_password(request.admin_senha),
@@ -306,6 +319,12 @@ async def login(
         )
 
     # Verificar status
+    if user_status == UserStatus.PENDING or user_status == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cadastro pendente de ativação.",
+        )
+
     if user_status == UserStatus.SUSPENDED or user_status == "suspended":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -380,6 +399,7 @@ async def refresh_token(
     usuario = result.scalar_one_or_none()
     if not usuario or usuario.status != UserStatus.ACTIVE:
         raise unauthorized()
+    await enforce_pending_session_revocation(db, usuario)
     payload["refresh_digest"] = digest(token)
     papel = usuario.papel.value if hasattr(usuario.papel, "value") else usuario.papel
     access, refresh, expires = await issue_tokens(usuario.id, usuario.tenant_id, papel, payload)
@@ -463,17 +483,14 @@ async def change_password(
 async def request_password_reset(
     request: PasswordResetRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[RedisClient, Depends(get_redis)],
 ):
     """
     Solicitar reset de senha.
 
     Envia email com link/token para reset.
+    Sempre retorna resposta genérica para evitar enumeração de usuários.
     """
-    import secrets
-
-    from app.core.email import email_service
-    from app.core.redis import get_redis
-
     # Buscar usuário
     result = await db.execute(
         select(Usuario).where(Usuario.email == request.email,
@@ -483,53 +500,32 @@ async def request_password_reset(
     users = result.scalars().all()
     usuario = users[0] if len(users) == 1 else None
 
-    # Sempre retorna sucesso para não expor se email existe
     if usuario:
-        # Gerar token de reset
-        token = secrets.token_urlsafe(32)
-
-        # Salvar no Redis (1 hora de validade)
-        redis = await get_redis()
-        await redis.store_password_reset_token(
-            user_id=str(usuario.id),
-            token=token,
-            ttl_seconds=3600,
-        )
-
-        # Enviar email
         try:
-            sent = await email_service.send_password_reset(
+            await execute_password_reset_request(
+                user_id=str(usuario.id),
                 email=usuario.email,
-                token=token,
                 nome=usuario.nome,
+                password_hash=usuario.password_hash,
+                redis=redis,
             )
-            if not sent:
-                logger.error(
-                    "Password reset email delivery failed",
-                    extra={"user_id": str(usuario.id)},
-                )
-        except Exception:
-            logger.exception(
-                "Password reset email provider unavailable",
-                extra={"user_id": str(usuario.id)},
-            )
+        except PasswordResetEmailError:
+            # Em erro no envio de e-mail no fluxo público, o token é invalidado
+            # pelo helper e mantemos a resposta genérica por proteção contra enumeração.
+            pass
 
     return SuccessResponse(
         message="Se o email existir no sistema, um link de recuperação será enviado"
     )
 
 
-@router.post("/password/reset/confirm", response_model=SuccessResponse)
-async def confirm_password_reset(
-    request: PasswordResetConfirm,
-    db: Annotated[AsyncSession, Depends(get_db)],
+@router.post("/password/reset/verify", response_model=SuccessResponse)
+async def verify_password_reset_token(
+    request: PasswordResetVerifyRequest,
+    redis: Annotated[RedisClient, Depends(get_redis)],
 ):
-    """Confirmar reset de senha com token."""
-    from app.core.redis import get_redis
-
-    # Verificar token no Redis
-    redis = await get_redis()
-    user_id = await redis.get_password_reset_user(request.token)
+    """Verificar se token de reset de senha é válido sem consumi-lo (operação não destrutiva)."""
+    user_id = await redis.peek_password_reset_user(request.token)
 
     if not user_id:
         raise HTTPException(
@@ -537,21 +533,140 @@ async def confirm_password_reset(
             detail="Token inválido ou expirado",
         )
 
-    # Atualizar senha
-    await db.execute(
-        update(Usuario)
-        .where(Usuario.id == UUID(user_id))
-        .values(password_hash=hash_password(request.new_password))
+    return SuccessResponse(message="Token válido")
+
+
+def _credential_fingerprint_sql():
+    """Fingerprint SQL equivalente a app.core.security.credential_fingerprint."""
+    return func.encode(
+        func.sha256(func.convert_to(Usuario.password_hash, literal_column("'UTF8'"))),
+        literal_column("'hex'"),
     )
-    await db.commit()
 
-    # Invalidar token usado
-    await redis.invalidate_password_reset_token(request.token)
 
-    # Revogar todas as sessões do usuário
-    await redis.revoke_all_user_sessions(user_id)
+def _extra_data_with_pending_revocation(marker: str):
+    base = case(
+        (func.jsonb_typeof(Usuario.extra_data) == literal_column("'object'"), Usuario.extra_data),
+        else_=func.jsonb_build_object(),
+    )
+    entry = func.jsonb_build_object(cast(PENDING_REVOCATION_KEY, Text), cast(marker, Text))
+    return base.op("||", return_type=JSONB)(entry)
 
-    return SuccessResponse(message="Senha redefinida com sucesso")
+
+async def _discard_reset_token(redis: RedisClient, token: str, lock_id: str) -> None:
+    """Consome token comprovadamente inutilizável; nunca propaga falha do Redis."""
+    try:
+        if not await redis.finalize_password_reset(token, lock_id):
+            await redis.invalidate_password_reset_token(token)
+    except Exception:
+        logger.warning("Falha ao descartar token de reset inutilizável", exc_info=True)
+
+
+@router.post("/password/reset/confirm", response_model=PasswordResetConfirmResponse)
+async def confirm_password_reset(
+    request: PasswordResetConfirm,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[RedisClient, Depends(get_redis)],
+):
+    """Confirmar reset de senha (USR-43 / USR-44).
+
+    - Redis: reserva atômica (Lua) serializa confirmações concorrentes.
+    - PostgreSQL: UPDATE condicional ao fingerprint da credencial na emissão do token.
+      É a garantia definitiva de uso único, válida mesmo se a trava expirar.
+    - Revogação: marcador durável gravado na mesma transação; o validador de sessões
+      o observa até que a revogação no Redis seja confirmada.
+    """
+    # 1. Reserva atômica (fail-closed se o Redis estiver indisponível)
+    try:
+        user_id, lock_id, fingerprint = await redis.reserve_password_reset_token(request.token)
+    except RedisError:
+        raise HTTPException(503, "Serviço de autenticação indisponível") from None
+
+    if not user_id or not lock_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token inválido, expirado ou em processamento",
+        )
+
+    if not fingerprint:
+        # Token sem vínculo com o estado da credencial não pode garantir uso único.
+        await _discard_reset_token(redis, request.token, lock_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token inválido ou expirado. Solicite uma nova recuperação de senha.",
+        )
+
+    # 2. UPDATE condicional: só altera se a credencial ainda é a da emissão do token
+    marker = secrets.token_hex(16)
+    try:
+        result = await db.execute(
+            update(Usuario)
+            .where(Usuario.id == UUID(user_id), _credential_fingerprint_sql() == fingerprint)
+            .values(
+                password_hash=hash_password(request.new_password),
+                extra_data=_extra_data_with_pending_revocation(marker),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            await db.rollback()
+            await _discard_reset_token(redis, request.token, lock_id)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Token inválido ou já utilizado",
+            )
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        # Nada foi persistido: libera a trava sem consumir o token, permitindo nova tentativa
+        try:
+            await redis.release_password_reset_lock(request.token, lock_id)
+        except Exception:
+            logger.warning("Falha ao liberar trava de reset após erro SQL", exc_info=True)
+        logger.exception("Falha no banco de dados durante redefinição de senha para usuario %s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao atualizar a senha no banco de dados. Tente novamente.",
+        ) from exc
+
+    # 3. Pós-commit: nada abaixo pode desfazer ou mascarar a troca já persistida
+    try:
+        if not await redis.finalize_password_reset(request.token, lock_id):
+            # Trava expirou durante o processamento; o fingerprint já impede reuso no banco.
+            logger.warning("Trava de reset expirou antes da finalização para usuario %s", user_id)
+            await redis.invalidate_password_reset_token(request.token)
+    except Exception:
+        logger.error("Falha ao consumir token de reset após commit para usuario %s", user_id, exc_info=True)
+
+    sessions_revoked = False
+    try:
+        await redis.revoke_all_user_sessions(user_id)
+        sessions_revoked = True
+    except Exception:
+        logger.critical(
+            "SECURITY_ALERT revogação de sessões pendente após troca de senha do usuario %s; "
+            "marcador durável ativo",
+            user_id,
+            exc_info=True,
+        )
+
+    if sessions_revoked:
+        try:
+            await clear_pending_session_revocation(db, UUID(user_id), marker)
+        except Exception:
+            await db.rollback()
+            logger.error("Sessões revogadas, mas marcador pendente não removido para usuario %s",
+                         user_id, exc_info=True)
+
+    return PasswordResetConfirmResponse(
+        message="Senha redefinida com sucesso",
+        password_changed=True,
+        sessions_revoked=sessions_revoked,
+        session_revocation_pending=not sessions_revoked,
+    )
+
 
 
 # ============================================================================
@@ -706,5 +821,36 @@ async def get_current_user_info(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuário não encontrado",
         )
+
+    return UsuarioRead.model_validate(usuario)
+
+
+@router.patch("/me", response_model=UsuarioRead)
+async def update_current_user_info(
+    data: UsuarioSelfUpdate,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Atualizar informações do próprio usuário (auto-serviço: apenas nome e telefone)."""
+    result = await db.execute(
+        select(Usuario).where(Usuario.id == current_user.id)
+    )
+    usuario = result.scalar_one_or_none()
+
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuário não encontrado",
+        )
+
+    update_data = data.model_dump(exclude_unset=True)
+    if update_data:
+        await db.execute(
+            update(Usuario)
+            .where(Usuario.id == current_user.id)
+            .values(**update_data)
+        )
+        await db.commit()
+        await db.refresh(usuario)
 
     return UsuarioRead.model_validate(usuario)

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -160,12 +161,12 @@ export default function LoginPage() {
             </form>
 
             <div className="mt-4 text-center">
-              <a
-                href="/forgot-password"
+              <Link
+                href="/esqueci-senha"
                 className="text-sm text-primary hover:underline"
               >
                 Esqueceu sua senha?
-              </a>
+              </Link>
             </div>
 
             <div className="mt-6 pt-6 border-t text-center">

@@ -10,11 +10,11 @@ export interface Usuario {
   tenant_id: string;
   nome: string;
   email: string;
-  cpf: string;
+  cpf?: string;
   telefone?: string;
   matricula: string;
   papel: "admin_dp" | "gestor" | "colaborador" | "auditor" | "financeiro";
-  status: "active" | "inactive" | "suspended";
+  status: "active" | "inactive" | "suspended" | "pending";
   mfa_enabled: boolean;
   foto_base_url?: string;
   equipe_id?: string;
@@ -112,14 +112,14 @@ export const usuariosService = {
    * Reativar usuário
    */
   async activate(id: string): Promise<Usuario> {
-    const { data } = await api.post(`/usuarios/${id}/activate`);
+    const { data } = await api.post(`/usuarios/${id}/reactivate`);
     return data;
   },
 
   /**
-   * Resetar senha (gera senha temporária)
+   * Resetar senha (dispara token de recuperação por e-mail)
    */
-  async resetPassword(id: string): Promise<{ temp_password: string }> {
+  async resetPassword(id: string): Promise<{ message: string }> {
     const { data } = await api.post(`/usuarios/${id}/reset-password`);
     return data;
   },

@@ -43,4 +43,4 @@ def test_alembic_upgrade_head_on_empty_database(monkeypatch):
     alembic_cfg = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     command.upgrade(alembic_cfg, "head")
 
-    assert asyncio.run(current_version()) == "20260930_0002"
+    assert asyncio.run(current_version()) == "20261001_0003"

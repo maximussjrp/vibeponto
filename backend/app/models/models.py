@@ -214,6 +214,7 @@ class Usuario(Base, TimestampMixin):
         UniqueConstraint("tenant_id", "cpf", name="uq_usuario_tenant_cpf"),
         UniqueConstraint("tenant_id", "matricula", name="uq_usuario_tenant_matricula"),
         Index("ix_usuarios_tenant_status", "tenant_id", "status"),
+        Index("uq_usuario_tenant_email_lower", "tenant_id", text("LOWER(email)"), unique=True),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -226,7 +227,7 @@ class Usuario(Base, TimestampMixin):
     # Dados pessoais
     nome: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
-    cpf: Mapped[str] = mapped_column(String(14), nullable=False)
+    cpf: Mapped[Optional[str]] = mapped_column(String(14), nullable=True)
     telefone: Mapped[Optional[str]] = mapped_column(String(20))
     matricula: Mapped[str] = mapped_column(String(50), nullable=False)
     

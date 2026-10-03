@@ -53,7 +53,7 @@ export default function PerfilPage() {
   const { data: userData, isLoading } = useQuery({
     queryKey: ["meu-perfil"],
     queryFn: async () => {
-      const response = await api.get("/usuarios/me");
+      const response = await api.get("/auth/me");
       return response.data;
     },
   });
@@ -73,7 +73,10 @@ export default function PerfilPage() {
 
   const updatePerfilMutation = useMutation({
     mutationFn: async (data: PerfilForm) => {
-      const response = await api.put("/usuarios/me", data);
+      const response = await api.patch("/auth/me", {
+        nome: data.nome,
+        telefone: data.telefone,
+      });
       return response.data;
     },
     onSuccess: (data) => {
@@ -88,9 +91,10 @@ export default function PerfilPage() {
 
   const updateSenhaMutation = useMutation({
     mutationFn: async (data: SenhaForm) => {
-      await api.put("/usuarios/me/senha", {
-        senha_atual: data.senha_atual,
-        nova_senha: data.nova_senha,
+      await api.post("/auth/password/change", {
+        current_password: data.senha_atual,
+        new_password: data.nova_senha,
+        confirm_password: data.confirmar_senha,
       });
     },
     onSuccess: () => {
@@ -101,36 +105,7 @@ export default function PerfilPage() {
   });
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith("image/")) {
-      toast.error("Selecione uma imagem válida");
-      return;
-    }
-
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error("Imagem muito grande. Máximo 5MB");
-      return;
-    }
-
-    setUploadingPhoto(true);
-    try {
-      const formData = new FormData();
-      formData.append("foto", file);
-      const response = await api.post("/usuarios/me/foto", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      queryClient.invalidateQueries({ queryKey: ["meu-perfil"] });
-      if (user) {
-        updateUser({ foto_url: response.data.foto_url });
-      }
-      toast.success("Foto atualizada!");
-    } catch (error) {
-      toast.error(getErrorMessage(error));
-    } finally {
-      setUploadingPhoto(false);
-    }
+    toast.error('Upload de foto em breve.');
   };
 
   return (
@@ -160,11 +135,12 @@ export default function PerfilPage() {
                 <Button
                   size="icon"
                   variant="outline"
-                  className="absolute bottom-0 right-0 rounded-full"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploadingPhoto}
+                  className="absolute bottom-0 right-0 rounded-full cursor-not-allowed opacity-60"
+                  onClick={() => toast.error("Upload de foto estará disponível em breve.")}
+                  disabled={true}
+                  title="Upload de foto estará disponível em breve"
                 >
-                  {uploadingPhoto ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+                  <Camera className="h-4 w-4" />
                 </Button>
                 <input
                   ref={fileInputRef}
@@ -172,6 +148,7 @@ export default function PerfilPage() {
                   accept="image/*"
                   onChange={handlePhotoUpload}
                   className="hidden"
+                  disabled={true}
                 />
               </div>
             )}
@@ -212,9 +189,9 @@ export default function PerfilPage() {
                   <div className="space-y-2">
                     <Label className="flex items-center gap-2">
                       <Mail className="h-4 w-4" />
-                      Email
+                      Email (Somente leitura)
                     </Label>
-                    <Input {...perfilForm.register("email")} type="email" />
+                    <Input {...perfilForm.register("email")} type="email" disabled className="bg-muted cursor-not-allowed" />
                     {perfilForm.formState.errors.email && (
                       <p className="text-sm text-destructive">{perfilForm.formState.errors.email.message}</p>
                     )}
