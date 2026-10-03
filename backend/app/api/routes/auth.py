@@ -1,12 +1,15 @@
 """Router de autenticação."""
 
 import logging
+import secrets
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import delete, select, update
+from redis.exceptions import RedisError
+from sqlalchemy import Text, case, cast, delete, func, literal_column, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, get_db
@@ -23,10 +26,13 @@ from app.core.security import (
 )
 from app.core.sessions import (
     COOKIE_NAME,
+    PENDING_REVOCATION_KEY,
     check_cookie_origin,
+    clear_pending_session_revocation,
     clear_refresh_cookie,
     cookie_mode,
     digest,
+    enforce_pending_session_revocation,
     issue_tokens,
     set_refresh_cookie,
     unauthorized,
@@ -41,6 +47,7 @@ from app.schemas import (
     MFAVerifyRequest,
     PasswordChangeRequest,
     PasswordResetConfirm,
+    PasswordResetConfirmResponse,
     PasswordResetRequest,
     PasswordResetVerifyRequest,
 
@@ -392,6 +399,7 @@ async def refresh_token(
     usuario = result.scalar_one_or_none()
     if not usuario or usuario.status != UserStatus.ACTIVE:
         raise unauthorized()
+    await enforce_pending_session_revocation(db, usuario)
     payload["refresh_digest"] = digest(token)
     papel = usuario.papel.value if hasattr(usuario.papel, "value") else usuario.papel
     access, refresh, expires = await issue_tokens(usuario.id, usuario.tenant_id, papel, payload)
@@ -498,6 +506,7 @@ async def request_password_reset(
                 user_id=str(usuario.id),
                 email=usuario.email,
                 nome=usuario.nome,
+                password_hash=usuario.password_hash,
                 redis=redis,
             )
         except PasswordResetEmailError:
@@ -527,15 +536,51 @@ async def verify_password_reset_token(
     return SuccessResponse(message="Token válido")
 
 
-@router.post("/password/reset/confirm", response_model=SuccessResponse)
+def _credential_fingerprint_sql():
+    """Fingerprint SQL equivalente a app.core.security.credential_fingerprint."""
+    return func.encode(
+        func.sha256(func.convert_to(Usuario.password_hash, literal_column("'UTF8'"))),
+        literal_column("'hex'"),
+    )
+
+
+def _extra_data_with_pending_revocation(marker: str):
+    base = case(
+        (func.jsonb_typeof(Usuario.extra_data) == literal_column("'object'"), Usuario.extra_data),
+        else_=func.jsonb_build_object(),
+    )
+    entry = func.jsonb_build_object(cast(PENDING_REVOCATION_KEY, Text), cast(marker, Text))
+    return base.op("||", return_type=JSONB)(entry)
+
+
+async def _discard_reset_token(redis: RedisClient, token: str, lock_id: str) -> None:
+    """Consome token comprovadamente inutilizável; nunca propaga falha do Redis."""
+    try:
+        if not await redis.finalize_password_reset(token, lock_id):
+            await redis.invalidate_password_reset_token(token)
+    except Exception:
+        logger.warning("Falha ao descartar token de reset inutilizável", exc_info=True)
+
+
+@router.post("/password/reset/confirm", response_model=PasswordResetConfirmResponse)
 async def confirm_password_reset(
     request: PasswordResetConfirm,
     db: Annotated[AsyncSession, Depends(get_db)],
     redis: Annotated[RedisClient, Depends(get_redis)],
 ):
-    """Confirmar reset de senha com reserva atômica de token (USR-43)."""
-    # 1. Reservar token no Redis atômica e exclusivamente
-    user_id, lock_id = await redis.reserve_password_reset_token(request.token)
+    """Confirmar reset de senha (USR-43 / USR-44).
+
+    - Redis: reserva atômica (Lua) serializa confirmações concorrentes.
+    - PostgreSQL: UPDATE condicional ao fingerprint da credencial na emissão do token.
+      É a garantia definitiva de uso único, válida mesmo se a trava expirar.
+    - Revogação: marcador durável gravado na mesma transação; o validador de sessões
+      o observa até que a revogação no Redis seja confirmada.
+    """
+    # 1. Reserva atômica (fail-closed se o Redis estiver indisponível)
+    try:
+        user_id, lock_id, fingerprint = await redis.reserve_password_reset_token(request.token)
+    except RedisError:
+        raise HTTPException(503, "Serviço de autenticação indisponível") from None
 
     if not user_id or not lock_id:
         raise HTTPException(
@@ -543,44 +588,84 @@ async def confirm_password_reset(
             detail="Token inválido, expirado ou em processamento",
         )
 
-    # 2. Atualizar a senha no banco de dados com tratamento seguro de erros
-    try:
-        await db.execute(
-            update(Usuario)
-            .where(Usuario.id == UUID(user_id))
-            .values(password_hash=hash_password(request.new_password))
+    if not fingerprint:
+        # Token sem vínculo com o estado da credencial não pode garantir uso único.
+        await _discard_reset_token(redis, request.token, lock_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token inválido ou expirado. Solicite uma nova recuperação de senha.",
         )
+
+    # 2. UPDATE condicional: só altera se a credencial ainda é a da emissão do token
+    marker = secrets.token_hex(16)
+    try:
+        result = await db.execute(
+            update(Usuario)
+            .where(Usuario.id == UUID(user_id), _credential_fingerprint_sql() == fingerprint)
+            .values(
+                password_hash=hash_password(request.new_password),
+                extra_data=_extra_data_with_pending_revocation(marker),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            await db.rollback()
+            await _discard_reset_token(redis, request.token, lock_id)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Token inválido ou já utilizado",
+            )
         await db.commit()
+    except HTTPException:
+        raise
     except Exception as exc:
         await db.rollback()
-        # Se a atualização do banco falhou, libera a trava sem consumir o token no Redis
-        await redis.release_password_reset_lock(request.token, lock_id)
-        logger.exception("Falha no banco de dados durante redefinição de senha para usuario %s: %s", user_id, exc)
+        # Nada foi persistido: libera a trava sem consumir o token, permitindo nova tentativa
+        try:
+            await redis.release_password_reset_lock(request.token, lock_id)
+        except Exception:
+            logger.warning("Falha ao liberar trava de reset após erro SQL", exc_info=True)
+        logger.exception("Falha no banco de dados durante redefinição de senha para usuario %s", user_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erro ao atualizar a senha no banco de dados. Tente novamente.",
         ) from exc
 
-    # 3. Consumir o token no Redis e revogar sessões ativas após o commit no banco
+    # 3. Pós-commit: nada abaixo pode desfazer ou mascarar a troca já persistida
     try:
-        await redis.finalize_password_reset(request.token, lock_id, user_id)
-    except Exception as redis_exc:
-        logger.error(
-            "Falha crítica no Redis ao finalizar reset ou revogar sessões para usuário %s: %s",
+        if not await redis.finalize_password_reset(request.token, lock_id):
+            # Trava expirou durante o processamento; o fingerprint já impede reuso no banco.
+            logger.warning("Trava de reset expirou antes da finalização para usuario %s", user_id)
+            await redis.invalidate_password_reset_token(request.token)
+    except Exception:
+        logger.error("Falha ao consumir token de reset após commit para usuario %s", user_id, exc_info=True)
+
+    sessions_revoked = False
+    try:
+        await redis.revoke_all_user_sessions(user_id)
+        sessions_revoked = True
+    except Exception:
+        logger.critical(
+            "SECURITY_ALERT revogação de sessões pendente após troca de senha do usuario %s; "
+            "marcador durável ativo",
             user_id,
-            redis_exc,
             exc_info=True,
         )
-        try:
-            await redis.consume_password_reset_user(request.token)
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Senha redefinida no banco, porém ocorreu falha ao revogar sessões no Redis.",
-        ) from redis_exc
 
-    return SuccessResponse(message="Senha redefinida com sucesso")
+    if sessions_revoked:
+        try:
+            await clear_pending_session_revocation(db, UUID(user_id), marker)
+        except Exception:
+            await db.rollback()
+            logger.error("Sessões revogadas, mas marcador pendente não removido para usuario %s",
+                         user_id, exc_info=True)
+
+    return PasswordResetConfirmResponse(
+        message="Senha redefinida com sucesso",
+        password_changed=True,
+        sessions_revoked=sessions_revoked,
+        session_revocation_pending=not sessions_revoked,
+    )
 
 
 

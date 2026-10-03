@@ -9,6 +9,7 @@ from app.schemas.auth import (
     PasswordChangeRequest,
     PasswordResetRequest,
     PasswordResetConfirm,
+    PasswordResetConfirmResponse,
     PasswordResetVerifyRequest,
 
     # MFA
@@ -151,6 +152,7 @@ __all__ = [
     "PasswordChangeRequest",
     "PasswordResetRequest",
     "PasswordResetConfirm",
+    "PasswordResetConfirmResponse",
     "MFASetupResponse",
     "MFAVerifyRequest",
     "MFADisableRequest",

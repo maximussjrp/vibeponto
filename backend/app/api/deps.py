@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import decode_token
-from app.core.sessions import validate_session, unauthorized
+from app.core.sessions import enforce_pending_session_revocation, validate_session, unauthorized
 from app.models import Usuario, UserRole, UserStatus
 
 
@@ -75,6 +75,9 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Usuário inativo ou suspenso",
         )
+
+    # USR-44: sessões anteriores a uma troca de senha com revogação pendente são rejeitadas.
+    await enforce_pending_session_revocation(db, usuario)
     
     return CurrentUser(
         id=usuario.id,

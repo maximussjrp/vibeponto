@@ -10,7 +10,7 @@ import pytest
 from app.api.deps import get_current_user, get_db, get_tenant_context
 from app.core.rate_limit import auth_rate_limit
 from app.core.redis import get_redis
-from app.core.security import hash_password
+from app.core.security import credential_fingerprint, hash_password
 from app.main import app
 from app.models.models import UserRole, UserStatus
 from app.services.password_reset import PasswordResetEmailError, execute_password_reset_request
@@ -43,9 +43,10 @@ class MockTenantContext:
 
 
 class FakeResult:
-    def __init__(self, items, scalar_val=None):
+    def __init__(self, items, scalar_val=None, rowcount=1):
         self._items = items
         self._scalar_val = scalar_val
+        self.rowcount = rowcount
 
     def scalar_one_or_none(self):
         return self._scalar_val
@@ -194,17 +195,20 @@ async def test_verify_password_reset_token_endpoint():
 
 @pytest.mark.asyncio
 async def test_confirm_password_reset_updates_password_and_invalidates():
-    """USR-34 / USR-39 / USR-43: Redefinição concluída atualiza a senha, consome o token e revoga todas as sessões."""
+    """USR-43 / USR-44: confirmação atualiza a senha, finaliza com posse da trava e revoga sessões."""
     tenant_id = uuid4()
     user_id = uuid4()
     user = MockUser(user_id, tenant_id, UserRole.COLABORADOR)
 
     mock_redis = AsyncMock()
-    mock_redis.reserve_password_reset_token = AsyncMock(return_value=(str(user_id), "mock_lock_id"))
+    mock_redis.reserve_password_reset_token = AsyncMock(
+        return_value=(str(user_id), "mock_lock_id", credential_fingerprint(user.password_hash))
+    )
     mock_redis.finalize_password_reset = AsyncMock(return_value=True)
+    mock_redis.revoke_all_user_sessions = AsyncMock(return_value=1)
 
     async def fake_execute(stmt, *args, **kwargs):
-        return FakeResult([user], scalar_val=user)
+        return FakeResult([user], scalar_val=user, rowcount=1)
 
     async def override_db():
         db = AsyncMock()
@@ -224,11 +228,73 @@ async def test_confirm_password_reset_updates_password_and_invalidates():
                     "confirm_password": "NewSecurePassword123!",
                 })
                 assert res.status_code == 200
-                assert res.json()["message"] == "Senha redefinida com sucesso"
+                body = res.json()
+                assert body["message"] == "Senha redefinida com sucesso"
+                assert body["password_changed"] is True
+                assert body["sessions_revoked"] is True
+                assert body["session_revocation_pending"] is False
 
-                # Verificar que reservou token e finalizou reset
                 mock_redis.reserve_password_reset_token.assert_called_once_with("valid_reset_token")
-                mock_redis.finalize_password_reset.assert_called_once_with("valid_reset_token", "mock_lock_id", str(user_id))
+                mock_redis.finalize_password_reset.assert_called_once_with("valid_reset_token", "mock_lock_id")
+                mock_redis.revoke_all_user_sessions.assert_awaited_once_with(str(user_id))
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_redis, None)
+
+
+@pytest.mark.asyncio
+async def test_confirm_password_reset_conditional_update_zero_rows_is_rejected_without_commit():
+    """USR-43: credencial já alterada (rowcount=0) -> 400, rollback, nenhum commit, token descartado."""
+    user_id = uuid4()
+    mock_redis = AsyncMock()
+    mock_redis.reserve_password_reset_token = AsyncMock(return_value=(str(user_id), "lock", "stale-fp"))
+    mock_redis.finalize_password_reset = AsyncMock(return_value=True)
+    mock_redis.revoke_all_user_sessions = AsyncMock()
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=FakeResult([], rowcount=0))
+
+    async def override_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_redis] = lambda: mock_redis
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            res = await client.post("/api/v1/auth/password/reset/confirm", json={
+                "token": "t", "new_password": "NewSecurePassword123!", "confirm_password": "NewSecurePassword123!",
+            })
+        assert res.status_code == 400
+        assert "já utilizado" in res.json()["detail"]
+        db.commit.assert_not_awaited()
+        db.rollback.assert_awaited()
+        mock_redis.finalize_password_reset.assert_awaited_once_with("t", "lock")
+        mock_redis.revoke_all_user_sessions.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_redis, None)
+
+
+@pytest.mark.asyncio
+async def test_confirm_password_reset_rejects_legacy_token_without_fingerprint():
+    """USR-43: token sem vínculo com a credencial não chega ao banco."""
+    mock_redis = AsyncMock()
+    mock_redis.reserve_password_reset_token = AsyncMock(return_value=(str(uuid4()), "lock", None))
+    mock_redis.finalize_password_reset = AsyncMock(return_value=True)
+    db = AsyncMock()
+
+    async def override_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_redis] = lambda: mock_redis
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            res = await client.post("/api/v1/auth/password/reset/confirm", json={
+                "token": "legacy", "new_password": "NewSecurePassword123!", "confirm_password": "NewSecurePassword123!",
+            })
+        assert res.status_code == 400
+        db.execute.assert_not_awaited()
+        db.commit.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_redis, None)

@@ -98,6 +98,18 @@ class PasswordResetConfirm(BaseSchema):
         return v
 
 
+class PasswordResetConfirmResponse(BaseSchema):
+    """Response de confirmação de reset de senha (USR-44)."""
+
+    success: bool = True
+    message: str = "Senha redefinida com sucesso"
+    password_changed: bool = True
+    sessions_revoked: bool = True
+    # True quando o Redis falhou após o commit: o marcador durável no PostgreSQL
+    # faz o validador de sessões rejeitar sessões antigas até concluir a revogação.
+    session_revocation_pending: bool = False
+
+
 class PasswordResetVerifyRequest(BaseSchema):
     """Verificação de token de reset de senha via POST body."""
 
